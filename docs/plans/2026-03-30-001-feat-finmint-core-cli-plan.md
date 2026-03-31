@@ -1,7 +1,7 @@
 ---
 title: "feat: Build Finmint CLI — Terminal-Based Personal Finance Tool"
 type: feat
-status: active
+status: completed
 date: 2026-03-30
 origin: docs/brainstorms/2026-03-30-finmint-core-requirements.md
 deepened: 2026-03-30

@@ -26,24 +26,6 @@ class TestAccountsData:
         assert rows[0]["institution_name"] == "Test Bank"
         assert rows[0]["last_four"] == "1234"
 
-    def test_delete_account_keeps_transactions(self):
-        conn = _setup_db()
-        _insert_account(conn)
-        from finmint.db import insert_transaction
-        insert_transaction(conn, {
-            "id": "txn-1", "account_id": "acct1", "amount": -5000,
-            "date": "2026-03-15", "description": "TEST",
-            "normalized_description": "TEST",
-        })
-        # Disable FK constraints for this delete (simulates ON DELETE SET NULL behavior)
-        conn.execute("PRAGMA foreign_keys=OFF")
-        conn.execute("DELETE FROM accounts WHERE id = ?", ("acct1",))
-        conn.commit()
-        conn.execute("PRAGMA foreign_keys=ON")
-        # Transactions remain
-        txns = conn.execute("SELECT * FROM transactions").fetchall()
-        assert len(txns) == 1
-
     def test_no_accounts_returns_empty(self):
         conn = _setup_db()
         rows = conn.execute("SELECT * FROM accounts").fetchall()

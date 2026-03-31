@@ -26,6 +26,8 @@ env/
 
 # Finmint local data (never commit)
 .finmint/
+teller/
+teller.zip
 
 # OS
 .DS_Store

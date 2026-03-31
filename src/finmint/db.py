@@ -38,12 +38,9 @@ DEFAULT_LABELS: list[tuple[str, bool]] = [
 _SCHEMA_SQL = """\
 CREATE TABLE IF NOT EXISTS accounts (
     id TEXT PRIMARY KEY,
-    enrollment_id TEXT,
     institution_name TEXT,
     account_type TEXT,
-    account_subtype TEXT,
     last_four TEXT,
-    access_token TEXT,
     last_synced_at TEXT,
     created_at TEXT
 );
@@ -67,8 +64,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     review_status TEXT DEFAULT 'needs_review',
     categorized_by TEXT,
     transfer_pair_id TEXT,
-    teller_type TEXT,
-    teller_category TEXT,
+    source_type TEXT,
     created_at TEXT
 );
 
@@ -178,8 +174,8 @@ def insert_transaction(conn: sqlite3.Connection, data: Transaction) -> None:
         "INSERT OR IGNORE INTO transactions "
         "(id, account_id, amount, date, description, normalized_description, "
         "label_id, review_status, categorized_by, transfer_pair_id, "
-        "teller_type, teller_category, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "source_type, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             data["id"],
             data.get("account_id"),
@@ -191,9 +187,27 @@ def insert_transaction(conn: sqlite3.Connection, data: Transaction) -> None:
             data.get("review_status", "needs_review"),
             data.get("categorized_by"),
             data.get("transfer_pair_id"),
-            data.get("teller_type"),
-            data.get("teller_category"),
+            data.get("source_type"),
             now,
+        ),
+    )
+    conn.commit()
+
+
+def upsert_account(conn: sqlite3.Connection, data: dict) -> None:
+    """Insert or update an account record. Uses INSERT OR REPLACE keyed on ID."""
+    now = _now_iso()
+    conn.execute(
+        "INSERT OR REPLACE INTO accounts "
+        "(id, institution_name, account_type, last_four, last_synced_at, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            data["id"],
+            data.get("institution_name"),
+            data.get("account_type"),
+            data.get("last_four"),
+            data.get("last_synced_at"),
+            data.get("created_at", now),
         ),
     )
     conn.commit()

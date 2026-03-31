@@ -1,15 +1,11 @@
 # Finmint configuration
 # Copy this to ~/.finmint/config.yaml and fill in your values
 
-teller:
-  # Path to your Teller mTLS certificate and private key
-  # Download from https://teller.io/settings/certificates
-  cert_path: /path/to/certificate.pem
-  key_path: /path/to/private_key.pem
-  # Environment: "sandbox" or "production"
-  environment: sandbox
-  # Your Teller application ID (from https://teller.io/settings)
-  application_id: your_application_id
+copilot:
+  # JWT token from Copilot Money web app
+  # Get this from browser dev tools: Network tab -> any graphql request -> Authorization header
+  # Run 'finmint token' to set this interactively
+  token: ""
 
 claude:
   # Name of the environment variable containing your Anthropic API key

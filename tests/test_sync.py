@@ -7,7 +7,7 @@ import pytest
 
 from finmint.db import get_transactions, init_db_with_conn, insert_transaction, seed_default_labels
 from finmint.sync import SyncResult, normalize_merchant, sync_month
-from finmint.teller import TellerAuthError
+from finmint.copilot import CopilotAuthError
 
 
 # ---------------------------------------------------------------------------
@@ -15,43 +15,50 @@ from finmint.teller import TellerAuthError
 # ---------------------------------------------------------------------------
 
 FAKE_CONFIG = {
-    "teller": {
-        "cert_path": "/tmp/fake-cert.pem",
-        "key_path": "/tmp/fake-key.pem",
-    }
+    "copilot": {
+        "token": "fake-jwt-token",
+    },
+    "claude": {
+        "api_key_env": "ANTHROPIC_API_KEY",
+    },
 }
 
 
-def _seed_account(
-    conn: sqlite3.Connection,
+def _make_copilot_account(
     account_id: str = "acc_001",
-    access_token: str = "tok_001",
+    name: str = "Checking",
+    account_type: str = "depository",
+    sub_type: str = "checking",
+    mask: str = "1234",
     institution_name: str = "Test Bank",
-) -> None:
-    """Insert a fake account row."""
-    conn.execute(
-        "INSERT INTO accounts (id, access_token, institution_name) VALUES (?, ?, ?)",
-        (account_id, access_token, institution_name),
-    )
-    conn.commit()
+) -> dict:
+    """Build a fake Copilot account dict."""
+    return {
+        "id": account_id,
+        "name": name,
+        "type": account_type,
+        "sub_type": sub_type,
+        "mask": mask,
+        "institution_name": institution_name,
+    }
 
 
-def _make_teller_txn(
+def _make_copilot_txn(
     txn_id: str,
+    account_id: str,
     amount: int,
     date: str,
     description: str = "Some Merchant",
-    txn_type: str = "card_payment",
-    category: str = "shopping",
+    source_type: str = "card_payment",
 ) -> dict:
-    """Build a fake Teller transaction dict (amounts already in cents)."""
+    """Build a fake Copilot transaction dict (amounts already in cents)."""
     return {
         "id": txn_id,
+        "account_id": account_id,
         "amount": amount,
         "date": date,
         "description": description,
-        "type": txn_type,
-        "category": category,
+        "source_type": source_type,
     }
 
 
@@ -108,27 +115,31 @@ class TestSyncMonth:
         seed_default_labels(in_memory_db)
         self.conn = in_memory_db
 
-    # -- Happy path: inserts new transactions with normalized descriptions --
+    # -- Happy path: discovers accounts, fetches transactions, upserts both --
 
-    @patch("finmint.sync.teller")
-    def test_sync_inserts_new_transactions(self, mock_teller):
-        _seed_account(self.conn)
+    @patch("finmint.sync.get_token", return_value="fake-jwt-token")
+    @patch("finmint.sync.copilot")
+    def test_sync_inserts_new_transactions(self, mock_copilot, _mock_get_token):
+        fake_accounts = [
+            _make_copilot_account("acc_001", "Checking", "depository", "checking", "1234", "Test Bank"),
+        ]
         fake_txns = [
-            _make_teller_txn("txn_1", -4250, "2026-03-05", "Trader Joe #123 LA"),
-            _make_teller_txn("txn_2", -1500, "2026-03-10", "Starbucks Coffee"),
+            _make_copilot_txn("txn_1", "acc_001", -4250, "2026-03-05", "Trader Joe #123 LA"),
+            _make_copilot_txn("txn_2", "acc_001", -1500, "2026-03-10", "Starbucks Coffee"),
         ]
 
         mock_client = MagicMock()
-        mock_teller.create_client.return_value.__enter__ = MagicMock(return_value=mock_client)
-        mock_teller.create_client.return_value.__exit__ = MagicMock(return_value=False)
-        mock_teller.fetch_transactions.return_value = fake_txns
-        mock_teller.TellerAuthError = TellerAuthError
+        mock_copilot.create_client.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_copilot.create_client.return_value.__exit__ = MagicMock(return_value=False)
+        mock_copilot.fetch_accounts.return_value = fake_accounts
+        mock_copilot.fetch_transactions.return_value = fake_txns
+        mock_copilot.CopilotAuthError = CopilotAuthError
 
         result = sync_month(self.conn, FAKE_CONFIG, 3, 2026, force=True)
 
         assert result["new_count"] == 2
         assert result["total_fetched"] == 2
-        assert result["skipped_accounts"] == []
+        assert result["error"] is None
 
         rows = get_transactions(self.conn, 3, 2026)
         assert len(rows) == 2
@@ -137,12 +148,25 @@ class TestSyncMonth:
         assert descs["txn_1"] == "TRADER JOE LA"
         assert descs["txn_2"] == "STARBUCKS COFFEE"
 
-    # -- Happy path: idempotent — skips already-existing transactions --
+        # Verify account was upserted
+        cur = self.conn.execute("SELECT * FROM accounts WHERE id = ?", ("acc_001",))
+        account_row = cur.fetchone()
+        assert account_row is not None
+        assert account_row["institution_name"] == "Test Bank"
+        assert account_row["account_type"] == "depository"
+        assert account_row["last_four"] == "1234"
 
-    @patch("finmint.sync.teller")
-    def test_sync_skips_existing_transactions(self, mock_teller):
-        _seed_account(self.conn)
-        # Pre-insert a transaction
+    # -- Happy path: idempotent — existing transactions skipped via INSERT OR IGNORE --
+
+    @patch("finmint.sync.get_token", return_value="fake-jwt-token")
+    @patch("finmint.sync.copilot")
+    def test_sync_skips_existing_transactions(self, mock_copilot, _mock_get_token):
+        # Pre-insert account and transaction
+        self.conn.execute(
+            "INSERT INTO accounts (id, institution_name) VALUES (?, ?)",
+            ("acc_001", "Test Bank"),
+        )
+        self.conn.commit()
         insert_transaction(self.conn, {
             "id": "txn_1",
             "account_id": "acc_001",
@@ -152,16 +176,18 @@ class TestSyncMonth:
             "normalized_description": "TRADER JOE LA",
         })
 
+        fake_accounts = [_make_copilot_account()]
         fake_txns = [
-            _make_teller_txn("txn_1", -4250, "2026-03-05", "Trader Joe #123 LA"),
-            _make_teller_txn("txn_2", -1500, "2026-03-10", "Starbucks Coffee"),
+            _make_copilot_txn("txn_1", "acc_001", -4250, "2026-03-05", "Trader Joe #123 LA"),
+            _make_copilot_txn("txn_2", "acc_001", -1500, "2026-03-10", "Starbucks Coffee"),
         ]
 
         mock_client = MagicMock()
-        mock_teller.create_client.return_value.__enter__ = MagicMock(return_value=mock_client)
-        mock_teller.create_client.return_value.__exit__ = MagicMock(return_value=False)
-        mock_teller.fetch_transactions.return_value = fake_txns
-        mock_teller.TellerAuthError = TellerAuthError
+        mock_copilot.create_client.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_copilot.create_client.return_value.__exit__ = MagicMock(return_value=False)
+        mock_copilot.fetch_accounts.return_value = fake_accounts
+        mock_copilot.fetch_transactions.return_value = fake_txns
+        mock_copilot.CopilotAuthError = CopilotAuthError
 
         result = sync_month(self.conn, FAKE_CONFIG, 3, 2026, force=True)
 
@@ -170,30 +196,36 @@ class TestSyncMonth:
         rows = get_transactions(self.conn, 3, 2026)
         assert len(rows) == 2
 
-    # -- Edge case: no transactions returned --
+    # -- Edge case: 0 accounts -> sync completes with 0 transactions --
 
-    @patch("finmint.sync.teller")
-    def test_sync_no_transactions_returns_zero(self, mock_teller):
-        _seed_account(self.conn)
-
+    @patch("finmint.sync.get_token", return_value="fake-jwt-token")
+    @patch("finmint.sync.copilot")
+    def test_sync_zero_accounts_returns_zero(self, mock_copilot, _mock_get_token):
         mock_client = MagicMock()
-        mock_teller.create_client.return_value.__enter__ = MagicMock(return_value=mock_client)
-        mock_teller.create_client.return_value.__exit__ = MagicMock(return_value=False)
-        mock_teller.fetch_transactions.return_value = []
-        mock_teller.TellerAuthError = TellerAuthError
+        mock_copilot.create_client.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_copilot.create_client.return_value.__exit__ = MagicMock(return_value=False)
+        mock_copilot.fetch_accounts.return_value = []
+        mock_copilot.fetch_transactions.return_value = []
+        mock_copilot.CopilotAuthError = CopilotAuthError
 
         result = sync_month(self.conn, FAKE_CONFIG, 3, 2026, force=True)
 
         assert result["new_count"] == 0
         assert result["total_fetched"] == 0
+        assert result["error"] is None
 
     # -- Happy path: current month always re-fetches --
 
+    @patch("finmint.sync.get_token", return_value="fake-jwt-token")
     @patch("finmint.sync._is_current_month", return_value=True)
-    @patch("finmint.sync.teller")
-    def test_sync_current_month_always_refetches(self, mock_teller, _mock_current):
-        _seed_account(self.conn)
-        # Pre-insert a transaction for the month
+    @patch("finmint.sync.copilot")
+    def test_sync_current_month_always_refetches(self, mock_copilot, _mock_current, _mock_get_token):
+        # Pre-insert account and transaction for the month
+        self.conn.execute(
+            "INSERT INTO accounts (id, institution_name) VALUES (?, ?)",
+            ("acc_001", "Test Bank"),
+        )
+        self.conn.commit()
         insert_transaction(self.conn, {
             "id": "txn_existing",
             "account_id": "acc_001",
@@ -203,30 +235,37 @@ class TestSyncMonth:
             "normalized_description": "OLD TXN",
         })
 
+        fake_accounts = [_make_copilot_account()]
         fake_txns = [
-            _make_teller_txn("txn_new", -2000, "2026-03-15", "New Merchant"),
+            _make_copilot_txn("txn_new", "acc_001", -2000, "2026-03-15", "New Merchant"),
         ]
 
         mock_client = MagicMock()
-        mock_teller.create_client.return_value.__enter__ = MagicMock(return_value=mock_client)
-        mock_teller.create_client.return_value.__exit__ = MagicMock(return_value=False)
-        mock_teller.fetch_transactions.return_value = fake_txns
-        mock_teller.TellerAuthError = TellerAuthError
+        mock_copilot.create_client.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_copilot.create_client.return_value.__exit__ = MagicMock(return_value=False)
+        mock_copilot.fetch_accounts.return_value = fake_accounts
+        mock_copilot.fetch_transactions.return_value = fake_txns
+        mock_copilot.CopilotAuthError = CopilotAuthError
 
         result = sync_month(self.conn, FAKE_CONFIG, 3, 2026)
 
         # Should have fetched despite existing data (current month)
         assert result["total_fetched"] == 1
         assert result["new_count"] == 1
-        mock_teller.fetch_transactions.assert_called_once()
+        mock_copilot.fetch_transactions.assert_called_once()
 
     # -- Happy path: past month with existing data skips fetch (unless force) --
 
+    @patch("finmint.sync.get_token", return_value="fake-jwt-token")
     @patch("finmint.sync._is_current_month", return_value=False)
-    @patch("finmint.sync.teller")
-    def test_sync_past_month_skips_if_data_exists(self, mock_teller, _mock_current):
-        _seed_account(self.conn)
-        # Pre-insert a transaction for February 2026
+    @patch("finmint.sync.copilot")
+    def test_sync_past_month_skips_if_data_exists(self, mock_copilot, _mock_current, _mock_get_token):
+        # Pre-insert account and transaction for February 2026
+        self.conn.execute(
+            "INSERT INTO accounts (id, institution_name) VALUES (?, ?)",
+            ("acc_001", "Test Bank"),
+        )
+        self.conn.commit()
         insert_transaction(self.conn, {
             "id": "txn_feb",
             "account_id": "acc_001",
@@ -236,20 +275,27 @@ class TestSyncMonth:
             "normalized_description": "OLD TXN",
         })
 
-        mock_teller.TellerAuthError = TellerAuthError
+        mock_copilot.CopilotAuthError = CopilotAuthError
 
         result = sync_month(self.conn, FAKE_CONFIG, 2, 2026)
 
-        # Should NOT have called Teller at all
-        mock_teller.create_client.assert_not_called()
+        # Should NOT have called Copilot at all
+        mock_copilot.create_client.assert_not_called()
         assert result["new_count"] == 0
         assert result["total_fetched"] == 0
 
+    # -- Integration: force=True re-fetches past month --
+
+    @patch("finmint.sync.get_token", return_value="fake-jwt-token")
     @patch("finmint.sync._is_current_month", return_value=False)
-    @patch("finmint.sync.teller")
-    def test_sync_past_month_fetches_with_force(self, mock_teller, _mock_current):
-        _seed_account(self.conn)
-        # Pre-insert a transaction
+    @patch("finmint.sync.copilot")
+    def test_sync_past_month_fetches_with_force(self, mock_copilot, _mock_current, _mock_get_token):
+        # Pre-insert account and transaction
+        self.conn.execute(
+            "INSERT INTO accounts (id, institution_name) VALUES (?, ?)",
+            ("acc_001", "Test Bank"),
+        )
+        self.conn.commit()
         insert_transaction(self.conn, {
             "id": "txn_feb",
             "account_id": "acc_001",
@@ -259,59 +305,40 @@ class TestSyncMonth:
             "normalized_description": "OLD TXN",
         })
 
+        fake_accounts = [_make_copilot_account()]
         fake_txns = [
-            _make_teller_txn("txn_feb_new", -500, "2026-02-20", "New Feb Merchant"),
+            _make_copilot_txn("txn_feb_new", "acc_001", -500, "2026-02-20", "New Feb Merchant"),
         ]
 
         mock_client = MagicMock()
-        mock_teller.create_client.return_value.__enter__ = MagicMock(return_value=mock_client)
-        mock_teller.create_client.return_value.__exit__ = MagicMock(return_value=False)
-        mock_teller.fetch_transactions.return_value = fake_txns
-        mock_teller.TellerAuthError = TellerAuthError
+        mock_copilot.create_client.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_copilot.create_client.return_value.__exit__ = MagicMock(return_value=False)
+        mock_copilot.fetch_accounts.return_value = fake_accounts
+        mock_copilot.fetch_transactions.return_value = fake_txns
+        mock_copilot.CopilotAuthError = CopilotAuthError
 
         result = sync_month(self.conn, FAKE_CONFIG, 2, 2026, force=True)
 
         # Should have fetched because force=True
-        mock_teller.fetch_transactions.assert_called_once()
+        mock_copilot.fetch_transactions.assert_called_once()
         assert result["new_count"] == 1
         assert result["total_fetched"] == 1
 
-    # -- Error path: TellerAuthError on one account, sync remaining --
+    # -- Error path: CopilotAuthError sets result["error"] with clear message --
 
-    @patch("finmint.sync.teller")
-    def test_teller_auth_error_skips_account_syncs_remaining(self, mock_teller):
-        _seed_account(self.conn, "acc_001", "tok_001", "Good Bank")
-        _seed_account(self.conn, "acc_002", "tok_002", "Bad Bank")
-
-        mock_teller.TellerAuthError = TellerAuthError
-
-        # First account succeeds, second raises TellerAuthError
-        good_txns = [
-            _make_teller_txn("txn_good", -3000, "2026-03-05", "Good Merchant"),
-        ]
-
-        call_count = {"n": 0}
-
-        def fake_create_client(config, token):
-            ctx = MagicMock()
-            client = MagicMock()
-            ctx.__enter__ = MagicMock(return_value=client)
-            ctx.__exit__ = MagicMock(return_value=False)
-
-            if token == "tok_002":
-                # Simulate auth error when entering context
-                def raise_auth(*a, **kw):
-                    raise TellerAuthError("Token expired")
-                ctx.__enter__ = raise_auth
-            return ctx
-
-        mock_teller.create_client.side_effect = fake_create_client
-        mock_teller.fetch_transactions.return_value = good_txns
+    @patch("finmint.sync.get_token", return_value="fake-jwt-token")
+    @patch("finmint.sync.copilot")
+    def test_copilot_auth_error_sets_error_message(self, mock_copilot, _mock_get_token):
+        mock_copilot.CopilotAuthError = CopilotAuthError
+        mock_copilot.create_client.return_value.__enter__ = MagicMock(
+            side_effect=CopilotAuthError("Token expired")
+        )
+        mock_copilot.create_client.return_value.__exit__ = MagicMock(return_value=False)
 
         result = sync_month(self.conn, FAKE_CONFIG, 3, 2026, force=True)
 
-        assert result["new_count"] == 1
-        assert result["total_fetched"] == 1
-        assert len(result["skipped_accounts"]) == 1
-        assert "Bad Bank" in result["skipped_accounts"][0]
-        assert "token may be expired" in result["skipped_accounts"][0]
+        assert result["error"] is not None
+        assert "Token expired or invalid" in result["error"]
+        assert "finmint token" in result["error"]
+        assert result["new_count"] == 0
+        assert result["total_fetched"] == 0

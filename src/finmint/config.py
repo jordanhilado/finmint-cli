@@ -12,16 +12,13 @@ FINMINT_DIR_NAME = ".finmint"
 CONFIG_FILE_NAME = "config.yaml"
 
 REQUIRED_KEYS = {
-    "teller": ["cert_path", "key_path", "environment", "application_id"],
+    "copilot": ["token"],
     "claude": ["api_key_env"],
 }
 
 DEFAULT_CONFIG = {
-    "teller": {
-        "cert_path": "/path/to/certificate.pem",
-        "key_path": "/path/to/private_key.pem",
-        "environment": "sandbox",
-        "application_id": "your_application_id",
+    "copilot": {
+        "token": "",
     },
     "claude": {
         "api_key_env": "ANTHROPIC_API_KEY",
@@ -95,6 +92,15 @@ def validate_config(config: dict) -> list[str]:
             if key not in config[section]:
                 errors.append(f"Missing required key: '{section}.{key}'")
 
+    # Warn if copilot token is empty or a placeholder
+    copilot_section = config.get("copilot", {})
+    if isinstance(copilot_section, dict):
+        token = copilot_section.get("token", "")
+        if not token or not token.strip():
+            errors.append(
+                "copilot.token is empty. Run 'finmint token' to set your Copilot Money JWT."
+            )
+
     # Warn if someone put a raw API key instead of an env var name
     claude_section = config.get("claude", {})
     if isinstance(claude_section, dict):
@@ -132,46 +138,50 @@ def resolve_api_key(config: dict) -> str:
     return api_key
 
 
-def init_config(home: Path | None = None, *, prompts: dict | None = None) -> Path:
-    """Create ~/.finmint/ directory and config.yaml with first-run prompts.
-
-    If prompts dict is provided, uses those values instead of interactive input.
+def init_config(home: Path | None = None) -> Path:
+    """Create ~/.finmint/ directory and config.yaml with default values.
     Returns the path to the created config file.
     """
     finmint_dir = _finmint_dir(home)
     config_file = _config_path(home)
-
-    # Create directory with restricted permissions
     finmint_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-    # Ensure permissions even if directory already existed
     finmint_dir.chmod(0o700)
+    config_file.write_text(yaml.dump(DEFAULT_CONFIG, default_flow_style=False))
+    config_file.chmod(0o600)
+    return config_file
 
-    if prompts is None:
-        cert_path = input("Teller certificate path (.pem): ").strip()
-        key_path = input("Teller private key path (.pem): ").strip()
-        environment = input("Teller environment (sandbox/production) [sandbox]: ").strip() or "sandbox"
-        application_id = input("Teller application ID: ").strip()
-        api_key_env = input("Claude API key env var name [ANTHROPIC_API_KEY]: ").strip() or "ANTHROPIC_API_KEY"
+
+def save_token(token: str, home: Path | None = None) -> Path:
+    """Save a Copilot Money JWT to config.yaml (read-modify-write).
+    Creates config file with defaults if it doesn't exist.
+    Returns the path to the config file.
+    """
+    config_file = _config_path(home)
+    if config_file.exists():
+        config = yaml.safe_load(config_file.read_text()) or {}
     else:
-        cert_path = prompts.get("cert_path", DEFAULT_CONFIG["teller"]["cert_path"])
-        key_path = prompts.get("key_path", DEFAULT_CONFIG["teller"]["key_path"])
-        environment = prompts.get("environment", DEFAULT_CONFIG["teller"]["environment"])
-        application_id = prompts.get("application_id", DEFAULT_CONFIG["teller"]["application_id"])
-        api_key_env = prompts.get("api_key_env", DEFAULT_CONFIG["claude"]["api_key_env"])
+        finmint_dir = _finmint_dir(home)
+        finmint_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        finmint_dir.chmod(0o700)
+        config = dict(DEFAULT_CONFIG)
 
-    config = {
-        "teller": {
-            "cert_path": cert_path,
-            "key_path": key_path,
-            "environment": environment,
-            "application_id": application_id,
-        },
-        "claude": {
-            "api_key_env": api_key_env,
-        },
-    }
+    if "copilot" not in config:
+        config["copilot"] = {}
+    config["copilot"]["token"] = token
 
     config_file.write_text(yaml.dump(config, default_flow_style=False))
     config_file.chmod(0o600)
-
     return config_file
+
+
+def get_token(config: dict) -> str:
+    """Read the Copilot Money JWT from config.
+    Raises RuntimeError if the token is not set or empty.
+    """
+    token = config.get("copilot", {}).get("token", "")
+    if not token or not token.strip():
+        raise RuntimeError(
+            "Copilot Money token is not set.\n"
+            "Run 'finmint token' to paste your JWT from the Copilot Money web app."
+        )
+    return token

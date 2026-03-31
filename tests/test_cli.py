@@ -29,11 +29,11 @@ def _mock_ensure_setup():
     from finmint.db import init_db, seed_default_labels
     conn = init_db(":memory:")
     seed_default_labels(conn)
-    return {"teller": {}, "claude": {"api_key_env": "FAKE"}}, conn
+    return {"copilot": {"token": "fake"}, "claude": {"api_key_env": "FAKE"}}, conn
 
 
 @patch("finmint.cli._ensure_setup", side_effect=_mock_ensure_setup)
-@patch("finmint.sync.sync_month", return_value={"new_count": 0, "total_fetched": 0, "skipped_accounts": []})
+@patch("finmint.sync.sync_month", return_value={"new_count": 0, "total_fetched": 0, "error": None})
 @patch("finmint.categorize.categorize_month", return_value={"rule_matched": 0, "transfers_detected": 0, "ai_categorized": 0, "uncategorized": 0})
 @patch("finmint.review_tui.ReviewApp")
 def test_default_command_with_period(mock_tui, mock_cat, mock_sync, mock_setup):

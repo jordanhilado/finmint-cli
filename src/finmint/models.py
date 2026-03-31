@@ -5,12 +5,9 @@ from typing import TypedDict
 
 class Account(TypedDict, total=False):
     id: str
-    enrollment_id: str
     institution_name: str
     account_type: str
-    account_subtype: str
     last_four: str
-    access_token: str
     last_synced_at: str
     created_at: str
 
@@ -34,8 +31,7 @@ class Transaction(TypedDict, total=False):
     review_status: str
     categorized_by: str
     transfer_pair_id: str
-    teller_type: str
-    teller_category: str
+    source_type: str
     created_at: str
 
 

@@ -1,4 +1,4 @@
-"""Transaction sync — fetch from Teller, normalize, and upsert into SQLite."""
+"""Transaction sync — fetch from Copilot Money, normalize, and upsert into SQLite."""
 
 import calendar
 import re
@@ -6,13 +6,14 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import TypedDict
 
-from finmint import teller
-from finmint.db import insert_transaction
+from finmint import copilot
+from finmint.config import get_token
+from finmint.db import insert_transaction, upsert_account
 
 
 class SyncResult(TypedDict):
     new_count: int
-    skipped_accounts: list[str]
+    error: str | None
     total_fetched: int
 
 
@@ -33,15 +34,6 @@ def normalize_merchant(raw: str | None) -> str:
     # Collapse whitespace
     text = re.sub(r"\s+", " ", text).strip()
     return text
-
-
-def _get_connected_accounts(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    """Return all accounts that have an access_token."""
-    cur = conn.execute(
-        "SELECT * FROM accounts WHERE access_token IS NOT NULL "
-        "AND access_token != ''"
-    )
-    return cur.fetchall()
 
 
 def _has_transactions_for_month(
@@ -73,22 +65,20 @@ def sync_month(
     year: int,
     force: bool = False,
 ) -> SyncResult:
-    """Sync transactions from Teller for a given month into the local DB.
+    """Sync transactions from Copilot Money for a given month into the local DB.
 
     For the current calendar month, always re-fetches (month is incomplete).
     For past months, skips if transactions already exist unless *force* is True.
-    Uses INSERT OR IGNORE keyed on Teller transaction ID for safe re-sync.
+    Uses INSERT OR IGNORE keyed on Copilot transaction ID for safe re-sync.
 
-    On TellerAuthError for a specific account, skips it and continues with
-    remaining accounts, collecting warnings in the result.
+    On CopilotAuthError, sets result["error"] with a clear message.
 
     Returns:
-        SyncResult with new_count, skipped_accounts, and total_fetched.
+        SyncResult with new_count, error, and total_fetched.
     """
-    accounts = _get_connected_accounts(conn)
     result: SyncResult = {
         "new_count": 0,
-        "skipped_accounts": [],
+        "error": None,
         "total_fetched": 0,
     }
 
@@ -98,52 +88,55 @@ def sync_month(
     if not current_month and not force and _has_transactions_for_month(conn, month, year):
         return result
 
-    # Build date range
-    start_date = f"{year:04d}-{month:02d}-01"
-    last_day = calendar.monthrange(year, month)[1]
-    end_date = f"{year:04d}-{month:02d}-{last_day:02d}"
+    token = get_token(config)
 
-    for account in accounts:
-        account_id = account["id"]
-        access_token = account["access_token"]
+    try:
+        with copilot.create_client(token) as client:
+            # Fetch and upsert accounts
+            accounts = copilot.fetch_accounts(client)
+            for account in accounts:
+                upsert_account(conn, {
+                    "id": account["id"],
+                    "institution_name": account["institution_name"],
+                    "account_type": account["type"],
+                    "last_four": account["mask"],
+                })
 
-        try:
-            with teller.create_client(config, access_token) as client:
-                txns = teller.fetch_transactions(
-                    client, account_id, start_date, end_date
+            # Build date range
+            start_date = f"{year:04d}-{month:02d}-01"
+            last_day = calendar.monthrange(year, month)[1]
+            end_date = f"{year:04d}-{month:02d}-{last_day:02d}"
+
+            # Fetch transactions for the date range
+            txns = copilot.fetch_transactions(client, start_date, end_date)
+            result["total_fetched"] = len(txns)
+
+            for txn in txns:
+                raw_desc = txn.get("description", "")
+                normalized = normalize_merchant(raw_desc)
+
+                # Check if transaction already exists to track new_count
+                cur = conn.execute(
+                    "SELECT 1 FROM transactions WHERE id = ?", (txn["id"],)
                 )
-        except teller.TellerAuthError:
-            institution = account["institution_name"] or account_id
-            result["skipped_accounts"].append(
-                f"Account {institution} failed to sync — token may be expired. "
-                "Run `finmint accounts` to re-enroll."
-            )
-            continue
+                already_exists = cur.fetchone() is not None
 
-        result["total_fetched"] += len(txns)
+                insert_transaction(conn, {
+                    "id": txn["id"],
+                    "account_id": txn["account_id"],
+                    "amount": txn["amount"],
+                    "date": txn["date"],
+                    "description": raw_desc,
+                    "normalized_description": normalized,
+                    "source_type": txn["source_type"],
+                })
 
-        for txn in txns:
-            raw_desc = txn.get("description", "")
-            normalized = normalize_merchant(raw_desc)
+                if not already_exists:
+                    result["new_count"] += 1
 
-            # Count rows before insert to detect new vs ignored
-            cur = conn.execute(
-                "SELECT 1 FROM transactions WHERE id = ?", (txn["id"],)
-            )
-            already_exists = cur.fetchone() is not None
-
-            insert_transaction(conn, {
-                "id": txn["id"],
-                "account_id": account_id,
-                "amount": txn["amount"],
-                "date": txn["date"],
-                "description": raw_desc,
-                "normalized_description": normalized,
-                "teller_type": txn.get("type"),
-                "teller_category": txn.get("category"),
-            })
-
-            if not already_exists:
-                result["new_count"] += 1
+    except copilot.CopilotAuthError:
+        result["error"] = (
+            "Token expired or invalid. Run `finmint token` to paste a new one."
+        )
 
     return result

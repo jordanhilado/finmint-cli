@@ -52,8 +52,7 @@ def _insert_txn(conn, txn_id, description, amount, date, account_id="acct1"):
         "review_status": "needs_review",
         "categorized_by": None,
         "transfer_pair_id": None,
-        "teller_type": None,
-        "teller_category": None,
+        "source_type": None,
     })
 
 
@@ -275,8 +274,7 @@ class TestIntegration:
             "review_status": "needs_review",
             "categorized_by": None,
             "transfer_pair_id": None,
-            "teller_type": "ach",
-            "teller_category": None,
+            "source_type": "ACH",
         })
         insert_transaction(conn, {
             "id": "txn-credit",
@@ -289,8 +287,7 @@ class TestIntegration:
             "review_status": "needs_review",
             "categorized_by": None,
             "transfer_pair_id": None,
-            "teller_type": "ach",
-            "teller_category": None,
+            "source_type": "ACH",
         })
 
         with patch("finmint.categorize.categorize_transactions", return_value=0):
@@ -331,8 +328,7 @@ class TestIntegration:
             "review_status": "needs_review",
             "categorized_by": None,
             "transfer_pair_id": None,
-            "teller_type": "transfer",
-            "teller_category": None,
+            "source_type": "INTERNAL_TRANSFER",
         })
         insert_transaction(conn, {
             "id": "txn-xfer-in",
@@ -345,8 +341,7 @@ class TestIntegration:
             "review_status": "needs_review",
             "categorized_by": None,
             "transfer_pair_id": None,
-            "teller_type": "transfer",
-            "teller_category": None,
+            "source_type": "INTERNAL_TRANSFER",
         })
 
         # Transaction 4: should go to AI

@@ -35,15 +35,15 @@ def _insert_txn(
     account_id: str,
     amount: int,
     date: str,
-    teller_type: str | None = None,
+    source_type: str | None = None,
     transfer_pair_id: str | None = None,
 ) -> str:
     tid = txn_id or str(uuid.uuid4())
     conn.execute(
         "INSERT INTO transactions "
-        "(id, account_id, amount, date, description, teller_type, transfer_pair_id, review_status) "
+        "(id, account_id, amount, date, description, source_type, transfer_pair_id, review_status) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, 'needs_review')",
-        (tid, account_id, amount, date, "Test txn", teller_type, transfer_pair_id),
+        (tid, account_id, amount, date, "Test txn", source_type, transfer_pair_id),
     )
     conn.commit()
     return tid
@@ -212,8 +212,8 @@ class TestDetectTransfers:
         assert txn1["review_status"] == "needs_review"
         assert txn2["review_status"] == "needs_review"
 
-    def test_card_payment_excluded(self, in_memory_db):
-        """Happy path: card_payment teller_type excluded from candidates."""
+    def test_regular_transactions_still_candidates(self, in_memory_db):
+        """REGULAR transactions are valid transfer candidates (no type exclusion)."""
         conn = in_memory_db
         _setup_db(conn)
         _insert_account(conn, "acct-1")
@@ -224,14 +224,71 @@ class TestDetectTransfers:
             account_id="acct-1",
             amount=-50000,
             date="2026-03-15",
-            teller_type="card_payment",
+            source_type="REGULAR",
         )
         t2 = _insert_txn(
-            conn, account_id="acct-2", amount=50000, date="2026-03-15"
+            conn,
+            account_id="acct-2",
+            amount=50000,
+            date="2026-03-15",
+            source_type="REGULAR",
         )
 
         count = detect_transfers(conn, 3, 2026)
 
-        assert count == 0
-        assert _get_txn(conn, t1)["transfer_pair_id"] is None
-        assert _get_txn(conn, t2)["transfer_pair_id"] is None
+        assert count == 1
+        assert _get_txn(conn, t1)["transfer_pair_id"] is not None
+        assert _get_txn(conn, t1)["transfer_pair_id"] == _get_txn(conn, t2)["transfer_pair_id"]
+
+    def test_internal_transfer_type_preferred(self, in_memory_db):
+        """INTERNAL_TRANSFER pairs score higher than REGULAR pairs."""
+        conn = in_memory_db
+        _setup_db(conn)
+        _insert_account(conn, "acct-1")
+        _insert_account(conn, "acct-2")
+        _insert_account(conn, "acct-3")
+
+        # Two possible matches for the debit: one INTERNAL_TRANSFER, one REGULAR.
+        t1 = _insert_txn(
+            conn, account_id="acct-1", amount=-10000, date="2026-03-15",
+            source_type="REGULAR",
+        )
+        t2 = _insert_txn(
+            conn, account_id="acct-2", amount=10000, date="2026-03-15",
+            source_type="INTERNAL_TRANSFER",
+        )
+        t3 = _insert_txn(
+            conn, account_id="acct-3", amount=10000, date="2026-03-15",
+            source_type="REGULAR",
+        )
+
+        count = detect_transfers(conn, 3, 2026)
+
+        assert count == 1
+        # The INTERNAL_TRANSFER match should be preferred.
+        txn1 = _get_txn(conn, t1)
+        txn2 = _get_txn(conn, t2)
+        txn3 = _get_txn(conn, t3)
+        assert txn1["transfer_pair_id"] == txn2["transfer_pair_id"]
+        assert txn3["transfer_pair_id"] is None
+
+    def test_source_type_none_does_not_crash(self, in_memory_db):
+        """source_type=None treated as non-preferred, no crash."""
+        conn = in_memory_db
+        _setup_db(conn)
+        _insert_account(conn, "acct-1")
+        _insert_account(conn, "acct-2")
+
+        t1 = _insert_txn(
+            conn, account_id="acct-1", amount=-25000, date="2026-03-15",
+            source_type=None,
+        )
+        t2 = _insert_txn(
+            conn, account_id="acct-2", amount=25000, date="2026-03-15",
+            source_type=None,
+        )
+
+        count = detect_transfers(conn, 3, 2026)
+
+        assert count == 1
+        assert _get_txn(conn, t1)["transfer_pair_id"] is not None

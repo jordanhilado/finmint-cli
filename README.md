@@ -1,10 +1,10 @@
 # Finmint
 
-Terminal-based personal finance tool. Pull bank transactions via [Teller API](https://teller.io), auto-categorize with AI, review interactively, and visualize spending -- all from your terminal.
+Terminal-based personal finance tool. Pull bank transactions from [Copilot Money](https://copilot.money), auto-categorize with AI, review interactively, and visualize spending -- all from your terminal.
 
 ## Features
 
-- Fetch transactions from all connected bank accounts via Teller API (mTLS)
+- Fetch transactions from all connected bank accounts via Copilot Money
 - AI-powered auto-categorization via Claude API, with local merchant rules that learn from your corrections
 - Interactive TUI for reviewing and categorizing transactions
 - Pie charts (monthly) and bar charts (yearly) for spending visualization
@@ -19,25 +19,24 @@ pip install -e .
 
 ## Setup
 
-1. **Teller certificates**: Sign up at [teller.io](https://teller.io), download your mTLS certificate and private key.
+1. **Copilot Money account**: Sign up at [copilot.money](https://copilot.money) and connect your bank accounts.
 
 2. **Claude API key**: Get an API key from [Anthropic](https://console.anthropic.com/).
 
-3. **Configure**: Copy the example config and fill in your values:
-   ```bash
-   mkdir -p ~/.finmint
-   cp config.example.yaml ~/.finmint/config.yaml
-   # Edit ~/.finmint/config.yaml with your cert paths and settings
-   ```
-
-4. **Set your API key**:
+3. **Set your API key**:
    ```bash
    export ANTHROPIC_API_KEY=sk-ant-...
    ```
 
-5. **Connect a bank account**:
+4. **Set your Copilot Money token**:
    ```bash
-   finmint accounts
+   finmint token
+   ```
+   This prompts you to paste a JWT from the Copilot Money web app (browser dev tools → Network tab → Authorization header). Tokens last ~1 hour.
+
+5. **Sync and review**:
+   ```bash
+   finmint 3-2026
    ```
 
 ## Usage
@@ -52,11 +51,14 @@ finmint view 3-2026
 # View yearly overview with bar chart
 finmint view 2026
 
+# Set or refresh your Copilot Money token
+finmint token
+
+# View connected bank accounts
+finmint accounts
+
 # Manage category labels
 finmint labels
-
-# Manage connected bank accounts
-finmint accounts
 
 # Manage merchant categorization rules
 finmint rules

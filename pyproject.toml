@@ -1,7 +1,7 @@
 [project]
 name = "finmint"
 version = "0.1.0"
-description = "Terminal-based personal finance tool with Teller API integration and AI categorization"
+description = "Terminal-based personal finance tool with Copilot Money integration and AI categorization"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11"

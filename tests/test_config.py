@@ -9,19 +9,18 @@ import yaml
 
 from finmint.config import (
     check_permissions,
+    get_token,
     init_config,
     load_config,
     resolve_api_key,
+    save_token,
     validate_config,
 )
 
 
 VALID_CONFIG = {
-    "teller": {
-        "cert_path": "/tmp/cert.pem",
-        "key_path": "/tmp/key.pem",
-        "environment": "sandbox",
-        "application_id": "app_123",
+    "copilot": {
+        "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.test",
     },
     "claude": {
         "api_key_env": "ANTHROPIC_API_KEY",
@@ -48,7 +47,7 @@ class TestLoadConfig:
         _write_config(tmp_path, VALID_CONFIG)
         result = load_config(home=tmp_path)
         assert result == VALID_CONFIG
-        assert result["teller"]["cert_path"] == "/tmp/cert.pem"
+        assert result["copilot"]["token"] == "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.test"
         assert result["claude"]["api_key_env"] == "ANTHROPIC_API_KEY"
 
     def test_missing_file_raises_with_instructions(self, tmp_path):
@@ -84,22 +83,43 @@ class TestValidateConfig:
         # Should not raise
         validate_config(VALID_CONFIG)
 
-    def test_missing_section_raises(self):
-        config = {"teller": VALID_CONFIG["teller"]}  # missing claude
+    def test_missing_copilot_section_raises(self):
+        config = {"claude": {"api_key_env": "ANTHROPIC_API_KEY"}}
+        with pytest.raises(ValueError, match="Missing required section: 'copilot'"):
+            validate_config(config)
+
+    def test_missing_claude_section_raises(self):
+        config = {"copilot": VALID_CONFIG["copilot"]}
         with pytest.raises(ValueError, match="Missing required section: 'claude'"):
             validate_config(config)
 
-    def test_missing_key_raises(self):
+    def test_missing_token_key_raises(self):
         config = {
-            "teller": {"cert_path": "/tmp/cert.pem"},  # missing other keys
+            "copilot": {},  # missing token
             "claude": {"api_key_env": "ANTHROPIC_API_KEY"},
         }
-        with pytest.raises(ValueError, match="Missing required key: 'teller.key_path'"):
+        with pytest.raises(ValueError, match="Missing required key: 'copilot.token'"):
+            validate_config(config)
+
+    def test_empty_copilot_token_raises(self):
+        config = {
+            "copilot": {"token": ""},
+            "claude": {"api_key_env": "ANTHROPIC_API_KEY"},
+        }
+        with pytest.raises(ValueError, match="copilot.token is empty"):
+            validate_config(config)
+
+    def test_whitespace_only_copilot_token_raises(self):
+        config = {
+            "copilot": {"token": "   "},
+            "claude": {"api_key_env": "ANTHROPIC_API_KEY"},
+        }
+        with pytest.raises(ValueError, match="copilot.token is empty"):
             validate_config(config)
 
     def test_raw_api_key_warns(self):
         config = {
-            "teller": VALID_CONFIG["teller"],
+            "copilot": VALID_CONFIG["copilot"],
             "claude": {"api_key_env": "sk-ant-api03-secret"},
         }
         with warnings.catch_warnings(record=True) as w:
@@ -110,7 +130,7 @@ class TestValidateConfig:
             assert "environment variable" in str(w[0].message)
 
     def test_section_not_a_dict_raises(self):
-        config = {"teller": "not_a_dict", "claude": {"api_key_env": "ANTHROPIC_API_KEY"}}
+        config = {"copilot": "not_a_dict", "claude": {"api_key_env": "ANTHROPIC_API_KEY"}}
         with pytest.raises(ValueError, match="must be a mapping"):
             validate_config(config)
 
@@ -136,7 +156,7 @@ class TestResolveApiKey:
 
     def test_custom_env_var_name(self, monkeypatch):
         config = {
-            "teller": VALID_CONFIG["teller"],
+            "copilot": VALID_CONFIG["copilot"],
             "claude": {"api_key_env": "MY_CUSTOM_KEY"},
         }
         monkeypatch.setenv("MY_CUSTOM_KEY", "sk-custom-key")
@@ -149,49 +169,88 @@ class TestResolveApiKey:
 
 class TestInitConfig:
     def test_creates_directory_and_config(self, tmp_path):
-        prompts = {
-            "cert_path": "/home/user/cert.pem",
-            "key_path": "/home/user/key.pem",
-            "environment": "sandbox",
-            "application_id": "app_test",
-            "api_key_env": "ANTHROPIC_API_KEY",
-        }
-        config_file = init_config(home=tmp_path, prompts=prompts)
+        config_file = init_config(home=tmp_path)
         assert config_file.exists()
         config = yaml.safe_load(config_file.read_text())
-        assert config["teller"]["cert_path"] == "/home/user/cert.pem"
+        assert config["copilot"]["token"] == ""
         assert config["claude"]["api_key_env"] == "ANTHROPIC_API_KEY"
 
     def test_directory_has_mode_0700(self, tmp_path):
-        prompts = {"cert_path": "/tmp/c.pem", "key_path": "/tmp/k.pem",
-                    "application_id": "app1"}
-        init_config(home=tmp_path, prompts=prompts)
+        init_config(home=tmp_path)
         finmint_dir = tmp_path / ".finmint"
         dir_mode = finmint_dir.stat().st_mode & 0o777
         assert dir_mode == 0o700
 
     def test_config_file_has_mode_0600(self, tmp_path):
-        prompts = {"cert_path": "/tmp/c.pem", "key_path": "/tmp/k.pem",
-                    "application_id": "app1"}
-        config_file = init_config(home=tmp_path, prompts=prompts)
+        config_file = init_config(home=tmp_path)
         file_mode = config_file.stat().st_mode & 0o777
         assert file_mode == 0o600
 
-    def test_defaults_when_prompts_omit_optional_fields(self, tmp_path):
-        prompts = {"cert_path": "/tmp/c.pem", "key_path": "/tmp/k.pem",
-                    "application_id": "app1"}
-        config_file = init_config(home=tmp_path, prompts=prompts)
+    def test_idempotent_on_existing_directory(self, tmp_path):
+        init_config(home=tmp_path)
+        # Run again -- should not error
+        config_file = init_config(home=tmp_path)
+        assert config_file.exists()
+
+
+# --- save_token ---
+
+
+class TestSaveToken:
+    def test_writes_token_to_existing_config(self, tmp_path):
+        # Create a config with claude section first
+        _write_config(tmp_path, {
+            "copilot": {"token": ""},
+            "claude": {"api_key_env": "ANTHROPIC_API_KEY"},
+        })
+        config_file = save_token("my-jwt-token", home=tmp_path)
         config = yaml.safe_load(config_file.read_text())
-        assert config["teller"]["environment"] == "sandbox"
+        assert config["copilot"]["token"] == "my-jwt-token"
+        # Claude section should not be clobbered
         assert config["claude"]["api_key_env"] == "ANTHROPIC_API_KEY"
 
-    def test_idempotent_on_existing_directory(self, tmp_path):
-        prompts = {"cert_path": "/tmp/c.pem", "key_path": "/tmp/k.pem",
-                    "application_id": "app1"}
-        init_config(home=tmp_path, prompts=prompts)
-        # Run again — should not error
-        config_file = init_config(home=tmp_path, prompts=prompts)
+    def test_creates_config_if_not_exists(self, tmp_path):
+        config_file = save_token("new-jwt-token", home=tmp_path)
         assert config_file.exists()
+        config = yaml.safe_load(config_file.read_text())
+        assert config["copilot"]["token"] == "new-jwt-token"
+        assert config["claude"]["api_key_env"] == "ANTHROPIC_API_KEY"
+
+    def test_file_has_mode_0600(self, tmp_path):
+        config_file = save_token("my-jwt-token", home=tmp_path)
+        file_mode = config_file.stat().st_mode & 0o777
+        assert file_mode == 0o600
+
+    def test_overwrites_existing_token(self, tmp_path):
+        _write_config(tmp_path, VALID_CONFIG)
+        save_token("updated-token", home=tmp_path)
+        config_file = tmp_path / ".finmint" / "config.yaml"
+        config = yaml.safe_load(config_file.read_text())
+        assert config["copilot"]["token"] == "updated-token"
+
+
+# --- get_token ---
+
+
+class TestGetToken:
+    def test_returns_token_from_valid_config(self):
+        result = get_token(VALID_CONFIG)
+        assert result == "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.test"
+
+    def test_raises_when_token_is_empty(self):
+        config = {"copilot": {"token": ""}}
+        with pytest.raises(RuntimeError, match="Copilot Money token is not set"):
+            get_token(config)
+
+    def test_raises_when_token_is_whitespace(self):
+        config = {"copilot": {"token": "   "}}
+        with pytest.raises(RuntimeError, match="Copilot Money token is not set"):
+            get_token(config)
+
+    def test_raises_when_copilot_section_missing(self):
+        config = {"claude": {"api_key_env": "ANTHROPIC_API_KEY"}}
+        with pytest.raises(RuntimeError, match="Copilot Money token is not set"):
+            get_token(config)
 
 
 # --- check_permissions ---

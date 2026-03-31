@@ -59,7 +59,7 @@ def categorize_transactions(
 
     Only transactions without a label_id (uncategorized) are sent.
     Data minimization: only merchant description, amount, and date are sent,
-    keyed by local sequence numbers (not Teller IDs).
+    keyed by local sequence numbers (not transaction IDs).
 
     Returns the count of successfully categorized transactions.
     """

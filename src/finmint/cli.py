@@ -76,7 +76,7 @@ def main(
 @app.command()
 def review(
     period: str = typer.Argument(..., help="Month to review (e.g., 3-2026)"),
-    force_sync: bool = typer.Option(False, "--force-sync", help="Re-fetch from Teller even if already synced"),
+    force_sync: bool = typer.Option(False, "--force-sync", help="Re-fetch even if already synced"),
 ):
     """Review and categorize transactions for a given month."""
     month, year = _parse_period(period)
@@ -85,12 +85,12 @@ def review(
     # Step 1: Sync
     from finmint.sync import sync_month
 
-    with Status("[bold]Syncing transactions from Teller...", console=console):
+    with Status("[bold]Syncing transactions from Copilot Money...", console=console):
         result = sync_month(conn, config, month, year, force=force_sync)
 
-    if result["skipped_accounts"]:
-        for warning in result["skipped_accounts"]:
-            console.print(f"[yellow]Warning: {warning}[/yellow]")
+    if result["error"]:
+        console.print(f"[red]{result['error']}[/red]")
+        raise typer.Exit(code=1)
 
     console.print(
         f"Synced {result['total_fetched']} transactions "
@@ -193,6 +193,41 @@ def view(
 
 
 @app.command()
+def token():
+    """Set your Copilot Money JWT token."""
+    from finmint.config import save_token
+    from finmint.copilot import create_client, fetch_accounts, CopilotAuthError
+
+    console.print(
+        "Paste your Copilot Money JWT token.\n"
+        "Find it in browser dev tools: Network tab → any graphql request → Authorization header.\n"
+    )
+    jwt = console.input("[bold]Token:[/bold] ").strip()
+    if jwt.startswith("Bearer "):
+        jwt = jwt[7:]
+
+    if not jwt:
+        console.print("[red]No token provided.[/red]")
+        raise typer.Exit(code=1)
+
+    # Validate by making a test API call
+    with Status("[bold]Validating token...", console=console):
+        try:
+            with create_client(jwt) as client:
+                accts = fetch_accounts(client)
+        except CopilotAuthError:
+            console.print("[red]Token is invalid or expired. Please try again.[/red]")
+            raise typer.Exit(code=1)
+        except Exception as e:
+            console.print(f"[red]Failed to validate token: {e}[/red]")
+            raise typer.Exit(code=1)
+
+    path = save_token(jwt)
+    console.print(f"[green]Token saved to {path}[/green]")
+    console.print(f"Found {len(accts)} connected accounts.")
+
+
+@app.command()
 def labels():
     """Manage category labels."""
     _, conn = _ensure_setup()
@@ -204,11 +239,11 @@ def labels():
 
 @app.command()
 def accounts():
-    """Manage connected bank accounts."""
-    config, conn = _ensure_setup()
+    """View connected bank accounts."""
+    _, conn = _ensure_setup()
     from finmint.accounts_tui import AccountsApp
 
-    tui = AccountsApp(conn, config)
+    tui = AccountsApp(conn)
     tui.run()
 
 

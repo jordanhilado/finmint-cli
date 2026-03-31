@@ -9,9 +9,9 @@ def detect_transfers(conn: sqlite3.Connection, month: int, year: int) -> int:
     """Detect transfer pairs among transactions for the given month.
 
     Finds matching debit/credit pairs across different accounts within a
-    2-day window.  Excludes card_payment transactions and those already
-    linked as transfers.  Greedy matching processes closest-date pairs
-    first, preferring pairs where teller_type indicates a transfer or ACH.
+    2-day window.  All transaction types are candidates (no exclusion filter).
+    Greedy matching processes closest-date pairs first, preferring pairs
+    where at least one side has source_type INTERNAL_TRANSFER.
 
     Returns the number of transfer pairs detected.
     """
@@ -30,12 +30,11 @@ def detect_transfers(conn: sqlite3.Connection, month: int, year: int) -> int:
     else:
         end = f"{year:04d}-{month + 1:02d}-01"
 
-    # Fetch candidate transactions: not card_payment, not already linked.
+    # Fetch candidate transactions: all types, not already linked.
     rows = conn.execute(
-        "SELECT id, account_id, amount, date, teller_type "
+        "SELECT id, account_id, amount, date, source_type "
         "FROM transactions "
         "WHERE date >= ? AND date < ? "
-        "  AND (teller_type IS NULL OR teller_type != 'card_payment') "
         "  AND transfer_pair_id IS NULL",
         (start, end),
     ).fetchall()
@@ -50,7 +49,7 @@ def detect_transfers(conn: sqlite3.Connection, month: int, year: int) -> int:
             "account_id": r["account_id"],
             "amount": r["amount"],
             "date": datetime.strptime(r["date"], "%Y-%m-%d"),
-            "teller_type": r["teller_type"],
+            "source_type": r["source_type"],
         }
         for r in rows
     ]
@@ -75,10 +74,10 @@ def detect_transfers(conn: sqlite3.Connection, month: int, year: int) -> int:
             if day_diff > 2:
                 continue
 
-            # Check if either has a transfer-indicating teller_type.
+            # Check if either has a transfer-indicating source_type.
             has_transfer_type = (
-                a["teller_type"] in ("transfer", "ach")
-                or b["teller_type"] in ("transfer", "ach")
+                a["source_type"] == "INTERNAL_TRANSFER"
+                or b["source_type"] == "INTERNAL_TRANSFER"
             )
 
             # Sort key: closest date first, prefer transfer-type pairs

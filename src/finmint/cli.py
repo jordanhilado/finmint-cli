@@ -5,15 +5,22 @@ to coexist with named subcommands like `finmint view`, `finmint labels`, etc.
 """
 
 import re
+import sys
+from pathlib import Path
 from typing import Optional
 
 import typer
 from typer.core import TyperGroup
 from rich.console import Console
+from rich.status import Status
 
 from finmint import __version__
 
 console = Console()
+
+# Default data directory
+FINMINT_DIR = Path.home() / ".finmint"
+DB_PATH = FINMINT_DIR / "finmint.db"
 
 
 class DefaultGroup(TyperGroup):
@@ -39,6 +46,25 @@ def version_callback(value: bool):
         raise typer.Exit()
 
 
+def _ensure_setup() -> tuple:
+    """Load config, init DB, return (config, conn)."""
+    from finmint.config import load_config, validate_config, check_permissions
+    from finmint.db import init_db, seed_default_labels
+
+    check_permissions()
+
+    try:
+        config = load_config()
+        validate_config(config)
+    except (FileNotFoundError, ValueError) as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1)
+
+    conn = init_db(str(DB_PATH))
+    seed_default_labels(conn)
+    return config, conn
+
+
 @app.callback()
 def main(
     version: Optional[bool] = typer.Option(None, "--version", callback=version_callback, is_eager=True),
@@ -54,8 +80,41 @@ def review(
 ):
     """Review and categorize transactions for a given month."""
     month, year = _parse_period(period)
-    console.print(f"[bold]Finmint[/bold] — reviewing {month}/{year} (force_sync={force_sync})")
-    # Will be wired in Unit 17: sync → categorize → review TUI
+    config, conn = _ensure_setup()
+
+    # Step 1: Sync
+    from finmint.sync import sync_month
+
+    with Status("[bold]Syncing transactions from Teller...", console=console):
+        result = sync_month(conn, config, month, year, force=force_sync)
+
+    if result["skipped_accounts"]:
+        for warning in result["skipped_accounts"]:
+            console.print(f"[yellow]Warning: {warning}[/yellow]")
+
+    console.print(
+        f"Synced {result['total_fetched']} transactions "
+        f"({result['new_count']} new)."
+    )
+
+    # Step 2: Categorize
+    from finmint.categorize import categorize_month
+
+    with Status("[bold]Categorizing transactions...", console=console):
+        cat_result = categorize_month(conn, config, month, year)
+
+    console.print(
+        f"Categorized: {cat_result['rule_matched']} by rules, "
+        f"{cat_result['transfers_detected']} transfers, "
+        f"{cat_result['ai_categorized']} by AI. "
+        f"{cat_result['uncategorized']} uncategorized."
+    )
+
+    # Step 3: Launch review TUI
+    from finmint.review_tui import ReviewApp
+
+    tui = ReviewApp(conn, month, year)
+    tui.run()
 
 
 @app.command()
@@ -63,34 +122,104 @@ def view(
     period: str = typer.Argument(..., help="Month (e.g., 3-2026) or year (e.g., 2026)"),
 ):
     """View spending charts and AI summary."""
+    config, conn = _ensure_setup()
+
+    from finmint.db import get_transactions
+    from finmint.charts import render_monthly_pie, render_yearly_bars, open_chart
+    from finmint.ai import generate_monthly_summary, generate_yearly_summary
+
     if re.match(r"^\d{4}$", period):
+        # Yearly view
         year = int(period)
-        console.print(f"[bold]Finmint[/bold] — yearly view for {year}")
+
+        # Check for data
+        has_data = False
+        for m in range(1, 13):
+            if get_transactions(conn, m, year):
+                has_data = True
+                break
+        if not has_data:
+            console.print(
+                f"[yellow]No transactions found for {year}. "
+                f"Run [bold]finmint <M-{year}>[/bold] to sync and review.[/yellow]"
+            )
+            raise typer.Exit()
+
+        # Render chart
+        chart_path = render_yearly_bars(conn, year)
+        if chart_path:
+            open_chart(chart_path)
+
+        # AI summary
+        try:
+            summary = generate_yearly_summary(config, conn, year)
+            console.print(f"\n[bold]AI Summary — {year}[/bold]\n")
+            console.print(summary)
+        except Exception as e:
+            console.print(f"[yellow]Could not generate AI summary: {e}[/yellow]")
+
     else:
+        # Monthly view
         month, year = _parse_period(period)
-        console.print(f"[bold]Finmint[/bold] — monthly view for {month}/{year}")
-    # Will be wired in Unit 16
+        txns = get_transactions(conn, month, year)
+
+        if not txns:
+            console.print(
+                f"[yellow]No transactions found for {month}/{year}. "
+                f"Run [bold]finmint {month}-{year}[/bold] to sync and review.[/yellow]"
+            )
+            raise typer.Exit()
+
+        # Unreviewed count
+        unreviewed = sum(1 for t in txns if t["review_status"] == "needs_review")
+        if unreviewed > 0:
+            console.print(
+                f"[yellow]⚠ {unreviewed} transactions still need review. "
+                f"Run [bold]finmint {month}-{year}[/bold] to review.[/yellow]"
+            )
+
+        # Render chart
+        chart_path = render_monthly_pie(conn, month, year)
+        if chart_path:
+            open_chart(chart_path)
+
+        # AI summary
+        try:
+            summary = generate_monthly_summary(config, conn, month, year)
+            console.print(f"\n[bold]AI Summary — {month}/{year}[/bold]\n")
+            console.print(summary)
+        except Exception as e:
+            console.print(f"[yellow]Could not generate AI summary: {e}[/yellow]")
 
 
 @app.command()
 def labels():
     """Manage category labels."""
-    console.print("[bold]Finmint[/bold] — label management")
-    # Will be wired in Unit 14
+    _, conn = _ensure_setup()
+    from finmint.labels_tui import LabelsApp
+
+    tui = LabelsApp(conn)
+    tui.run()
 
 
 @app.command()
 def accounts():
     """Manage connected bank accounts."""
-    console.print("[bold]Finmint[/bold] — account management")
-    # Will be wired in Unit 7
+    config, conn = _ensure_setup()
+    from finmint.accounts_tui import AccountsApp
+
+    tui = AccountsApp(conn, config)
+    tui.run()
 
 
 @app.command()
 def rules():
     """Manage merchant categorization rules."""
-    console.print("[bold]Finmint[/bold] — rules management")
-    # Will be wired in Unit 13
+    _, conn = _ensure_setup()
+    from finmint.rules_tui import RulesApp
+
+    tui = RulesApp(conn)
+    tui.run()
 
 
 def _parse_period(period: str) -> tuple[int, int]:

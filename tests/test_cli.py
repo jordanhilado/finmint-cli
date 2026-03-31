@@ -1,5 +1,7 @@
 """Tests for CLI routing — validates Typer default command + subcommands coexistence."""
 
+from unittest.mock import patch, MagicMock
+
 from typer.testing import CliRunner
 
 from finmint.cli import app
@@ -22,48 +24,58 @@ def test_help_lists_commands():
     assert "rules" in result.stdout
 
 
-def test_default_command_with_period():
+def _mock_ensure_setup():
+    """Patch _ensure_setup to return a mock config and in-memory DB."""
+    from finmint.db import init_db, seed_default_labels
+    conn = init_db(":memory:")
+    seed_default_labels(conn)
+    return {"teller": {}, "claude": {"api_key_env": "FAKE"}}, conn
+
+
+@patch("finmint.cli._ensure_setup", side_effect=_mock_ensure_setup)
+@patch("finmint.sync.sync_month", return_value={"new_count": 0, "total_fetched": 0, "skipped_accounts": []})
+@patch("finmint.categorize.categorize_month", return_value={"rule_matched": 0, "transfers_detected": 0, "ai_categorized": 0, "uncategorized": 0})
+@patch("finmint.review_tui.ReviewApp")
+def test_default_command_with_period(mock_tui, mock_cat, mock_sync, mock_setup):
     """Typer routing spike: finmint 3-2026 routes to the review flow."""
     result = runner.invoke(app, ["3-2026"])
     assert result.exit_code == 0
-    assert "reviewing 3/2026" in result.stdout
 
 
-def test_default_command_with_force_sync():
-    result = runner.invoke(app, ["3-2026", "--force-sync"])
-    assert result.exit_code == 0
-    assert "force_sync=True" in result.stdout
-
-
-def test_view_subcommand_monthly():
-    """finmint view 3-2026 routes to view, not confused with default."""
+@patch("finmint.cli._ensure_setup", side_effect=_mock_ensure_setup)
+def test_view_subcommand_monthly_no_data(mock_setup):
+    """finmint view 3-2026 routes to view, shows no-data message."""
     result = runner.invoke(app, ["view", "3-2026"])
     assert result.exit_code == 0
-    assert "monthly view for 3/2026" in result.stdout
+    assert "No transactions found" in result.stdout
 
 
-def test_view_subcommand_yearly():
+@patch("finmint.cli._ensure_setup", side_effect=_mock_ensure_setup)
+def test_view_subcommand_yearly_no_data(mock_setup):
     result = runner.invoke(app, ["view", "2026"])
     assert result.exit_code == 0
-    assert "yearly view for 2026" in result.stdout
+    assert "No transactions found" in result.stdout
 
 
-def test_labels_subcommand():
+@patch("finmint.cli._ensure_setup", side_effect=_mock_ensure_setup)
+@patch("finmint.labels_tui.LabelsApp")
+def test_labels_subcommand(mock_tui, mock_setup):
     result = runner.invoke(app, ["labels"])
     assert result.exit_code == 0
-    assert "label management" in result.stdout
 
 
-def test_accounts_subcommand():
+@patch("finmint.cli._ensure_setup", side_effect=_mock_ensure_setup)
+@patch("finmint.accounts_tui.AccountsApp")
+def test_accounts_subcommand(mock_tui, mock_setup):
     result = runner.invoke(app, ["accounts"])
     assert result.exit_code == 0
-    assert "account management" in result.stdout
 
 
-def test_rules_subcommand():
+@patch("finmint.cli._ensure_setup", side_effect=_mock_ensure_setup)
+@patch("finmint.rules_tui.RulesApp")
+def test_rules_subcommand(mock_tui, mock_setup):
     result = runner.invoke(app, ["rules"])
     assert result.exit_code == 0
-    assert "rules management" in result.stdout
 
 
 def test_invalid_period_format():
@@ -80,6 +92,5 @@ def test_invalid_month():
 
 def test_no_args_shows_help():
     result = runner.invoke(app, [])
-    # Click convention: no_args_is_help returns exit code 2
     assert result.exit_code == 2
     assert "Usage" in result.stdout

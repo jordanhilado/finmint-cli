@@ -1,0 +1,30 @@
+[project]
+name = "finmint"
+version = "0.1.0"
+description = "Terminal-based personal finance tool with Teller API integration and AI categorization"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.9",
+    "rich>=13.0",
+    "textual>=0.40",
+    "httpx>=0.25",
+    "pandas>=2.0",
+    "matplotlib>=3.8",
+    "pyyaml>=6.0",
+    "anthropic>=0.18",
+]
+
+[project.scripts]
+finmint = "finmint.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/finmint"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio", "respx"]

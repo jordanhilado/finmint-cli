@@ -114,7 +114,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE labels ADD COLUMN color TEXT")
         conn.commit()
     if "copilot_id" not in label_cols:
-        conn.execute("ALTER TABLE labels ADD COLUMN copilot_id TEXT UNIQUE")
+        conn.execute("ALTER TABLE labels ADD COLUMN copilot_id TEXT")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_labels_copilot_id ON labels(copilot_id)")
         conn.commit()
     if "icon" not in label_cols:
         conn.execute("ALTER TABLE labels ADD COLUMN icon TEXT")

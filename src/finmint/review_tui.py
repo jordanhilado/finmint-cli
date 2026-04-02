@@ -28,6 +28,12 @@ _SORT_COLUMNS = ("date", "merchant", "amount", "category", "account", "note", "s
 _COLUMN_LABELS = ("Date", "Merchant", "Amount", "Category", "Account", "Note", "Status")
 
 
+def _is_hex_color(color: str) -> bool:
+    """Return True if color is a valid hex color like '#2ecc71' or '2ecc71'."""
+    h = color.lstrip("#")
+    return len(h) == 6 and all(c in "0123456789abcdefABCDEF" for c in h)
+
+
 def _text_color_for_bg(hex_color: str) -> str:
     """Return 'white' or 'black' for best contrast against a hex background."""
     h = hex_color.lstrip("#")
@@ -55,7 +61,7 @@ class LabelPickerScreen(ModalScreen[int | None]):
         options: list[Option] = []
         for r in labels:
             color = r["color"]
-            if color:
+            if color and _is_hex_color(color):
                 fg = _text_color_for_bg(color)
                 prompt = Text(f" {r['name']} ", style=f"{fg} on {color}")
             else:
@@ -240,7 +246,7 @@ class OneByOneScreen(Screen):
             return Text("Uncategorized")
         name = row["name"]
         color = row["color"]
-        if color:
+        if color and _is_hex_color(color):
             fg = _text_color_for_bg(color)
             return Text(f" {name} ", style=f"{fg} on {color}")
         return Text(name)
@@ -556,7 +562,7 @@ class ReviewApp(App):
             return Text("—")
         name = row["name"]
         color = row["color"]
-        if color:
+        if color and _is_hex_color(color):
             fg = _text_color_for_bg(color)
             return Text(f" {name} ", style=f"{fg} on {color}")
         return Text(name)

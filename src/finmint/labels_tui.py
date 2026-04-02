@@ -10,6 +10,12 @@ from textual.widgets import DataTable, Footer, Header
 from finmint.db import get_labels
 
 
+def _is_hex_color(color: str) -> bool:
+    """Return True if color is a valid hex color like '#2ecc71' or '2ecc71'."""
+    h = color.lstrip("#")
+    return len(h) == 6 and all(c in "0123456789abcdefABCDEF" for c in h)
+
+
 def _text_color_for_bg(hex_color: str) -> str:
     """Return 'white' or 'black' for best contrast against a hex background."""
     h = hex_color.lstrip("#")
@@ -53,7 +59,7 @@ class LabelsApp(App):
             ).fetchone()["c"]
             icon = label["icon"] or ""
             color = label["color"]
-            if color:
+            if color and _is_hex_color(color):
                 fg = _text_color_for_bg(color)
                 label_cell = Text(f" {label['name']} ", style=f"{fg} on {color}")
                 color_cell = Text(f" {color} ", style=f"{fg} on {color}")

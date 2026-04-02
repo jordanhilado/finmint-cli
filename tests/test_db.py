@@ -1,17 +1,19 @@
-"""Tests for finmint.db — schema, seed data, and CRUD helpers."""
+"""Tests for finmint.db — schema, category upsert, and CRUD helpers."""
 
 import sqlite3
 
 import pytest
 
 from finmint.db import (
-    get_labels,
+    get_copilot_id_for_label,
+    get_label_by_copilot_id,
     get_label_by_name,
+    get_labels,
     get_transactions,
     init_db_with_conn,
     insert_transaction,
-    seed_default_labels,
     update_transaction_label,
+    upsert_category,
 )
 
 
@@ -56,53 +58,101 @@ class TestInitDb:
         init_db_with_conn(in_memory_db)
         init_db_with_conn(in_memory_db)  # second call should not error
 
+    def test_labels_table_has_copilot_id_and_icon_columns(
+        self, in_memory_db: sqlite3.Connection
+    ):
+        init_db_with_conn(in_memory_db)
+        cur = in_memory_db.execute("PRAGMA table_info(labels)")
+        cols = {row[1] for row in cur.fetchall()}
+        assert "copilot_id" in cols
+        assert "icon" in cols
+
+    def test_transactions_table_has_item_id_column(
+        self, in_memory_db: sqlite3.Connection
+    ):
+        init_db_with_conn(in_memory_db)
+        cur = in_memory_db.execute("PRAGMA table_info(transactions)")
+        cols = {row[1] for row in cur.fetchall()}
+        assert "item_id" in cols
+
 
 # ---------------------------------------------------------------------------
-# Seed labels tests
+# Category upsert tests
 # ---------------------------------------------------------------------------
 
 
-class TestSeedDefaultLabels:
-    """seed_default_labels populates 16 labels correctly."""
+class TestUpsertCategory:
+    """upsert_category inserts and updates categories keyed on copilot_id."""
 
     @pytest.fixture(autouse=True)
     def _setup(self, in_memory_db: sqlite3.Connection):
         init_db_with_conn(in_memory_db)
         self.conn = in_memory_db
 
-    def test_inserts_16_labels(self):
-        seed_default_labels(self.conn)
+    def test_inserts_new_category(self):
+        upsert_category(self.conn, "cat-1", "Groceries", "#2ecc71", "🛒")
         labels = get_labels(self.conn)
-        assert len(labels) == 16
+        assert len(labels) == 1
+        assert labels[0]["name"] == "Groceries"
+        assert labels[0]["copilot_id"] == "cat-1"
+        assert labels[0]["color"] == "#2ecc71"
+        assert labels[0]["icon"] == "🛒"
 
-    def test_transfer_is_protected(self):
-        seed_default_labels(self.conn)
-        transfer = get_label_by_name(self.conn, "Transfer")
-        assert transfer is not None
-        assert transfer["is_protected"] == 1
-
-    def test_income_is_protected(self):
-        seed_default_labels(self.conn)
-        income = get_label_by_name(self.conn, "Income")
-        assert income is not None
-        assert income["is_protected"] == 1
-
-    def test_non_protected_label(self):
-        seed_default_labels(self.conn)
-        groceries = get_label_by_name(self.conn, "Groceries")
-        assert groceries is not None
-        assert groceries["is_protected"] == 0
-
-    def test_all_are_default(self):
-        seed_default_labels(self.conn)
+    def test_updates_existing_category_on_conflict(self):
+        upsert_category(self.conn, "cat-1", "Groceries", "#2ecc71", "🛒")
+        upsert_category(self.conn, "cat-1", "Food & Groceries", "#00ff00", "🥑")
         labels = get_labels(self.conn)
-        assert all(label["is_default"] == 1 for label in labels)
+        assert len(labels) == 1
+        assert labels[0]["name"] == "Food & Groceries"
+        assert labels[0]["color"] == "#00ff00"
+        assert labels[0]["icon"] == "🥑"
 
-    def test_idempotent(self):
-        seed_default_labels(self.conn)
-        seed_default_labels(self.conn)
+    def test_multiple_categories(self):
+        upsert_category(self.conn, "cat-1", "Groceries", "#2ecc71", "🛒")
+        upsert_category(self.conn, "cat-2", "Dining", "#e74c3c", "🍽️")
         labels = get_labels(self.conn)
-        assert len(labels) == 16
+        assert len(labels) == 2
+
+    def test_nullable_color_and_icon(self):
+        upsert_category(self.conn, "cat-1", "Unknown")
+        label = get_labels(self.conn)[0]
+        assert label["color"] is None
+        assert label["icon"] is None
+
+
+class TestGetCopilotIdForLabel:
+    """get_copilot_id_for_label returns the Copilot category ID for a local label."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, in_memory_db: sqlite3.Connection):
+        init_db_with_conn(in_memory_db)
+        self.conn = in_memory_db
+
+    def test_returns_copilot_id(self):
+        upsert_category(self.conn, "cat-abc", "Groceries")
+        label = get_label_by_name(self.conn, "Groceries")
+        assert get_copilot_id_for_label(self.conn, label["id"]) == "cat-abc"
+
+    def test_returns_none_for_nonexistent_label(self):
+        assert get_copilot_id_for_label(self.conn, 9999) is None
+
+
+class TestGetLabelByCopilotId:
+    """get_label_by_copilot_id returns a local label by its Copilot category ID."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, in_memory_db: sqlite3.Connection):
+        init_db_with_conn(in_memory_db)
+        self.conn = in_memory_db
+
+    def test_returns_label(self):
+        upsert_category(self.conn, "cat-xyz", "Travel", "#8e44ad")
+        row = get_label_by_copilot_id(self.conn, "cat-xyz")
+        assert row is not None
+        assert row["name"] == "Travel"
+
+    def test_returns_none_for_nonexistent(self):
+        assert get_label_by_copilot_id(self.conn, "nonexistent") is None
 
 
 # ---------------------------------------------------------------------------
@@ -116,7 +166,8 @@ class TestTransactions:
     @pytest.fixture(autouse=True)
     def _setup(self, in_memory_db: sqlite3.Connection):
         init_db_with_conn(in_memory_db)
-        seed_default_labels(in_memory_db)
+        upsert_category(in_memory_db, "cat-groc", "Groceries", "#2ecc71")
+        upsert_category(in_memory_db, "cat-shop", "Shopping", "#e67e22")
         self.conn = in_memory_db
 
     def test_insert_and_retrieve(self):
@@ -134,6 +185,21 @@ class TestTransactions:
         assert rows[0]["id"] == "txn_001"
         assert rows[0]["amount"] == -6742
         assert rows[0]["review_status"] == "needs_review"
+
+    def test_insert_with_item_id(self):
+        insert_transaction(
+            self.conn,
+            {
+                "id": "txn_002",
+                "item_id": "item-abc",
+                "amount": -1000,
+                "date": "2026-03-10",
+            },
+        )
+        row = self.conn.execute(
+            "SELECT item_id FROM transactions WHERE id = ?", ("txn_002",)
+        ).fetchone()
+        assert row["item_id"] == "item-abc"
 
     def test_get_transactions_filters_by_month(self):
         for txn_id, date in [

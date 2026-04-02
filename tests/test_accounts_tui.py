@@ -1,11 +1,12 @@
 """Tests for accounts TUI data operations."""
 
-from finmint.db import init_db, seed_default_labels
+from finmint.db import init_db
+from tests.conftest import seed_test_categories
 
 
 def _setup_db():
     conn = init_db(":memory:")
-    seed_default_labels(conn)
+    seed_test_categories(conn)
     return conn
 
 

@@ -26,9 +26,10 @@ def test_help_lists_commands():
 
 def _mock_ensure_setup():
     """Patch _ensure_setup to return a mock config and in-memory DB."""
-    from finmint.db import init_db, seed_default_labels
+    from finmint.db import init_db
+    from tests.conftest import seed_test_categories
     conn = init_db(":memory:")
-    seed_default_labels(conn)
+    seed_test_categories(conn)
     return {"copilot": {"token": "fake"}, "claude": {"api_key_env": "FAKE"}}, conn
 
 

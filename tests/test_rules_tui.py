@@ -1,12 +1,13 @@
 """Tests for rules TUI data operations."""
 
-from finmint.db import init_db, seed_default_labels, get_label_by_name
+from finmint.db import init_db, get_label_by_name
 from finmint.rules import add_rule, delete_rule, get_all_rules, update_rule
+from tests.conftest import seed_test_categories
 
 
 def _setup_db():
     conn = init_db(":memory:")
-    seed_default_labels(conn)
+    seed_test_categories(conn)
     return conn
 
 

@@ -1,4 +1,9 @@
-"""Copilot Money GraphQL client -- fetch accounts and transactions via JWT auth."""
+"""Copilot Money GraphQL client -- fetch/mutate accounts, transactions, and categories.
+
+Mutation signatures reverse-engineered from Copilot Money's web app and the
+JaviSoto/copilot-money-cli reference project. The API is unofficial and
+undocumented; field names may change without notice.
+"""
 
 from contextlib import contextmanager
 
@@ -23,8 +28,42 @@ query Institution($id: ID!) {
 TRANSACTIONS_QUERY = """
 query Transactions($first: Int, $after: String) {
   transactions(first: $first, after: $after) {
-    edges { node { id name amount date type accountId } }
+    edges { node { id itemId name amount date type accountId categoryId isReviewed userNotes } }
     pageInfo { hasNextPage endCursor }
+  }
+}
+"""
+
+CATEGORIES_QUERY = """
+query Categories {
+  categories {
+    id name colorName
+    icon { ... on EmojiUnicode { unicode __typename } __typename }
+    childCategories {
+      id name colorName
+      icon { ... on EmojiUnicode { unicode __typename } __typename }
+      __typename
+    }
+    __typename
+  }
+}
+"""
+
+EDIT_TRANSACTION_MUTATION = """
+mutation EditTransaction($itemId: ID!, $accountId: ID!, $id: ID!, $input: EditTransactionInput) {
+  editTransaction(itemId: $itemId, accountId: $accountId, id: $id, input: $input) {
+    transaction { id categoryId isReviewed userNotes __typename }
+    __typename
+  }
+}
+"""
+
+BULK_EDIT_TRANSACTIONS_MUTATION = """
+mutation BulkEditTransactions($input: BulkEditTransactionInput!, $filter: TransactionFilter) {
+  bulkEditTransactions(filter: $filter, input: $input) {
+    updated { id isReviewed __typename }
+    failed { error errorCode __typename }
+    __typename
   }
 }
 """
@@ -169,7 +208,7 @@ def fetch_transactions(
     Returns:
         List of transaction dicts with keys: id, account_id, amount (int
         cents), date, description, source_type.  Amounts are converted to
-        integer cents (negative = debit, positive = credit).
+        integer cents (positive = debit, negative = credit).
     """
     all_transactions: list[dict] = []
     after: str | None = None
@@ -202,10 +241,14 @@ def fetch_transactions(
             all_transactions.append({
                 "id": node["id"],
                 "account_id": node["accountId"],
+                "item_id": node.get("itemId"),
                 "amount": _amount_to_cents(node["amount"]),
                 "date": txn_date,
                 "description": node["name"],
                 "source_type": node["type"],
+                "category_id": node.get("categoryId"),
+                "is_reviewed": node.get("isReviewed", False),
+                "user_notes": node.get("userNotes"),
             })
 
         if not page_info.get("hasNextPage", False):
@@ -214,3 +257,124 @@ def fetch_transactions(
         after = page_info.get("endCursor")
 
     return all_transactions
+
+
+def fetch_categories(client: httpx.Client) -> list[dict]:
+    """Fetch all categories from Copilot Money.
+
+    Returns a flat list of category dicts (parent and child) with keys:
+    id, name, color, icon.
+    """
+    response = client.post(BASE_URL, json={"query": CATEGORIES_QUERY})
+    response.raise_for_status()
+    data = response.json()
+    _raise_for_graphql_errors(data)
+
+    raw_categories = data.get("data", {}).get("categories", [])
+    results: list[dict] = []
+
+    for cat in raw_categories:
+        results.append(_parse_category(cat))
+        for child in cat.get("childCategories", []):
+            results.append(_parse_category(child))
+
+    return results
+
+
+def _parse_category(cat: dict) -> dict:
+    """Extract id, name, color, icon from a Copilot Money category node."""
+    icon_data = cat.get("icon")
+    icon = None
+    if icon_data and icon_data.get("__typename") == "EmojiUnicode":
+        icon = icon_data.get("unicode")
+
+    return {
+        "id": cat["id"],
+        "name": cat["name"],
+        "color": cat.get("colorName"),
+        "icon": icon,
+    }
+
+
+def set_transaction_category(
+    client: httpx.Client,
+    txn_id: str,
+    account_id: str,
+    item_id: str,
+    category_id: str,
+) -> None:
+    """Set a transaction's category in Copilot Money."""
+    response = client.post(
+        BASE_URL,
+        json={
+            "operationName": "EditTransaction",
+            "query": EDIT_TRANSACTION_MUTATION,
+            "variables": {
+                "id": txn_id,
+                "accountId": account_id,
+                "itemId": item_id,
+                "input": {"categoryId": category_id},
+            },
+        },
+    )
+    response.raise_for_status()
+    _raise_for_graphql_errors(response.json())
+
+
+def set_transaction_note(
+    client: httpx.Client,
+    txn_id: str,
+    account_id: str,
+    item_id: str,
+    note: str | None,
+) -> None:
+    """Set or clear a transaction's note in Copilot Money."""
+    response = client.post(
+        BASE_URL,
+        json={
+            "operationName": "EditTransaction",
+            "query": EDIT_TRANSACTION_MUTATION,
+            "variables": {
+                "id": txn_id,
+                "accountId": account_id,
+                "itemId": item_id,
+                "input": {"userNotes": note or ""},
+            },
+        },
+    )
+    response.raise_for_status()
+    _raise_for_graphql_errors(response.json())
+
+
+def set_transaction_reviewed(
+    client: httpx.Client,
+    txn_id: str,
+    account_id: str,
+    item_id: str,
+    reviewed: bool = True,
+) -> None:
+    """Mark a transaction as reviewed or unreviewed in Copilot Money."""
+    response = client.post(
+        BASE_URL,
+        json={
+            "operationName": "BulkEditTransactions",
+            "query": BULK_EDIT_TRANSACTIONS_MUTATION,
+            "variables": {
+                "filter": {
+                    "ids": [
+                        {"accountId": account_id, "id": txn_id, "itemId": item_id},
+                    ],
+                },
+                "input": {"isReviewed": reviewed},
+            },
+        },
+    )
+    response.raise_for_status()
+    data = response.json()
+    _raise_for_graphql_errors(data)
+
+    failed = data.get("data", {}).get("bulkEditTransactions", {}).get("failed", [])
+    if failed:
+        raise CopilotAPIError(
+            f"Failed to update review status: {failed[0].get('error', 'unknown')}"
+        )

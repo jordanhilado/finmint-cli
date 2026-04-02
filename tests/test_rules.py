@@ -1,12 +1,13 @@
 """Tests for the merchant rules engine."""
 
 from finmint import db, rules
+from tests.conftest import seed_test_categories
 
 
 def _setup(conn):
     """Initialize schema and seed labels."""
     db.init_db_with_conn(conn)
-    db.seed_default_labels(conn)
+    seed_test_categories(conn)
 
 
 def _get_label_id(conn, name):

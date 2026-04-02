@@ -1,15 +1,16 @@
 """Tests for review TUI data operations."""
 
 from finmint.db import (
-    init_db, seed_default_labels, insert_transaction,
+    init_db, insert_transaction,
     get_transactions, get_label_by_name, update_transaction_label,
 )
 from finmint.rules import add_rule, get_all_rules
+from tests.conftest import seed_test_categories
 
 
 def _setup_db():
     conn = init_db(":memory:")
-    seed_default_labels(conn)
+    seed_test_categories(conn)
     conn.execute(
         "INSERT INTO accounts (id, institution_name, account_type, last_four) VALUES (?, ?, ?, ?)",
         ("acct1", "Test Bank", "checking", "1234"),

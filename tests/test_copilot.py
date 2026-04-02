@@ -10,7 +10,11 @@ from finmint.copilot import (
     _amount_to_cents,
     create_client,
     fetch_accounts,
+    fetch_categories,
     fetch_transactions,
+    set_transaction_category,
+    set_transaction_note,
+    set_transaction_reviewed,
 )
 
 
@@ -84,6 +88,10 @@ def _make_raw_txn(
     date: str = "2026-03-15",
     txn_type: str = "REGULAR",
     account_id: str = "acc_1",
+    item_id: str = "item_1",
+    category_id: str | None = None,
+    is_reviewed: bool = False,
+    user_notes: str | None = None,
 ) -> dict:
     """Build a raw Copilot transaction node as returned by the GraphQL API."""
     return {
@@ -93,6 +101,10 @@ def _make_raw_txn(
         "date": date,
         "type": txn_type,
         "accountId": account_id,
+        "itemId": item_id,
+        "categoryId": category_id,
+        "isReviewed": is_reviewed,
+        "userNotes": user_notes,
     }
 
 
@@ -166,7 +178,7 @@ class TestFetchTransactions:
     ):
         """fetch_transactions returns transactions with amounts in cents, date-filtered."""
         nodes = [
-            _make_raw_txn("txn_1", "Spotify", -30.0, "2026-03-15"),
+            _make_raw_txn("txn_1", "Spotify", -30.0, "2026-03-15", category_id="cat-1", is_reviewed=True, user_notes="monthly"),
             _make_raw_txn("txn_2", "Paycheck", 1840.17, "2026-03-01", "INCOME"),
         ]
 
@@ -182,12 +194,17 @@ class TestFetchTransactions:
         assert len(result) == 2
         assert result[0]["id"] == "txn_1"
         assert result[0]["account_id"] == "acc_1"
+        assert result[0]["item_id"] == "item_1"
         assert result[0]["amount"] == -3000
         assert result[0]["date"] == "2026-03-15"
         assert result[0]["description"] == "Spotify"
         assert result[0]["source_type"] == "REGULAR"
+        assert result[0]["category_id"] == "cat-1"
+        assert result[0]["is_reviewed"] is True
+        assert result[0]["user_notes"] == "monthly"
         assert result[1]["amount"] == 184017
         assert result[1]["source_type"] == "INCOME"
+        assert result[1]["is_reviewed"] is False
 
     @respx.mock
     def test_single_page_response_returns_correctly(self, mock_client):
@@ -384,3 +401,203 @@ class TestCreateClient:
         """create_client configures Bearer auth header on the yielded client."""
         with create_client("my_jwt_token") as client:
             assert client.headers["authorization"] == "Bearer my_jwt_token"
+
+
+# ---------------------------------------------------------------------------
+# fetch_categories
+# ---------------------------------------------------------------------------
+
+
+def _graphql_categories_response(categories: list[dict]) -> dict:
+    """Build a Copilot-style GraphQL categories response body."""
+    return {"data": {"categories": categories}}
+
+
+def _make_raw_category(
+    cat_id: str = "cat_1",
+    name: str = "Groceries",
+    color_name: str = "green",
+    icon_unicode: str | None = "🛒",
+    children: list | None = None,
+) -> dict:
+    """Build a raw Copilot category node."""
+    icon = None
+    if icon_unicode:
+        icon = {"unicode": icon_unicode, "__typename": "EmojiUnicode"}
+    return {
+        "id": cat_id,
+        "name": name,
+        "colorName": color_name,
+        "icon": icon,
+        "childCategories": children or [],
+        "__typename": "Category",
+    }
+
+
+class TestFetchCategories:
+    """Tests for the fetch_categories function."""
+
+    @respx.mock
+    def test_happy_path_returns_parsed_categories(self, mock_client):
+        """fetch_categories returns a flat list of categories."""
+        categories = [
+            _make_raw_category("cat_1", "Groceries", "green", "🛒"),
+            _make_raw_category("cat_2", "Transport", "blue", "🚗"),
+        ]
+        respx.post(BASE_URL).mock(
+            return_value=httpx.Response(
+                200, json=_graphql_categories_response(categories)
+            )
+        )
+
+        result = fetch_categories(mock_client)
+
+        assert len(result) == 2
+        assert result[0]["id"] == "cat_1"
+        assert result[0]["name"] == "Groceries"
+        assert result[0]["color"] == "green"
+        assert result[0]["icon"] == "🛒"
+
+    @respx.mock
+    def test_flattens_child_categories(self, mock_client):
+        """fetch_categories flattens parent and child categories."""
+        child = _make_raw_category("cat_child", "Fast Food", "red", "🍔")
+        parent = _make_raw_category("cat_parent", "Dining", "red", "🍽️", children=[child])
+        respx.post(BASE_URL).mock(
+            return_value=httpx.Response(
+                200, json=_graphql_categories_response([parent])
+            )
+        )
+
+        result = fetch_categories(mock_client)
+
+        assert len(result) == 2
+        assert result[0]["id"] == "cat_parent"
+        assert result[1]["id"] == "cat_child"
+
+    @respx.mock
+    def test_empty_categories(self, mock_client):
+        respx.post(BASE_URL).mock(
+            return_value=httpx.Response(
+                200, json=_graphql_categories_response([])
+            )
+        )
+
+        result = fetch_categories(mock_client)
+
+        assert result == []
+
+    @respx.mock
+    def test_category_without_icon(self, mock_client):
+        cat = _make_raw_category("cat_no_icon", "Other", "gray", None)
+        respx.post(BASE_URL).mock(
+            return_value=httpx.Response(
+                200, json=_graphql_categories_response([cat])
+            )
+        )
+
+        result = fetch_categories(mock_client)
+
+        assert result[0]["icon"] is None
+
+    @respx.mock
+    def test_auth_error_raises(self, mock_client):
+        error_body = {
+            "errors": [{"message": "Not authenticated", "extensions": {"code": "UNAUTHENTICATED"}}]
+        }
+        respx.post(BASE_URL).mock(
+            return_value=httpx.Response(200, json=error_body)
+        )
+
+        with pytest.raises(CopilotAuthError):
+            fetch_categories(mock_client)
+
+
+# ---------------------------------------------------------------------------
+# Mutations
+# ---------------------------------------------------------------------------
+
+
+class TestSetTransactionCategory:
+    """Tests for set_transaction_category."""
+
+    @respx.mock
+    def test_happy_path(self, mock_client):
+        respx.post(BASE_URL).mock(
+            return_value=httpx.Response(200, json={
+                "data": {"editTransaction": {"transaction": {"id": "txn_1", "categoryId": "cat_1", "isReviewed": False, "userNotes": None, "__typename": "Transaction"}, "__typename": "EditTransactionPayload"}}
+            })
+        )
+
+        set_transaction_category(mock_client, "txn_1", "acc_1", "item_1", "cat_1")
+
+    @respx.mock
+    def test_api_error_raises(self, mock_client):
+        error_body = {
+            "errors": [{"message": "Transaction not found", "extensions": {"code": "NOT_FOUND"}}]
+        }
+        respx.post(BASE_URL).mock(
+            return_value=httpx.Response(200, json=error_body)
+        )
+
+        with pytest.raises(CopilotAPIError, match="Transaction not found"):
+            set_transaction_category(mock_client, "txn_1", "acc_1", "item_1", "cat_1")
+
+
+class TestSetTransactionNote:
+    """Tests for set_transaction_note."""
+
+    @respx.mock
+    def test_happy_path(self, mock_client):
+        respx.post(BASE_URL).mock(
+            return_value=httpx.Response(200, json={
+                "data": {"editTransaction": {"transaction": {"id": "txn_1", "categoryId": None, "isReviewed": False, "userNotes": "test note", "__typename": "Transaction"}, "__typename": "EditTransactionPayload"}}
+            })
+        )
+
+        set_transaction_note(mock_client, "txn_1", "acc_1", "item_1", "test note")
+
+    @respx.mock
+    def test_clear_note(self, mock_client):
+        respx.post(BASE_URL).mock(
+            return_value=httpx.Response(200, json={
+                "data": {"editTransaction": {"transaction": {"id": "txn_1", "categoryId": None, "isReviewed": False, "userNotes": "", "__typename": "Transaction"}, "__typename": "EditTransactionPayload"}}
+            })
+        )
+
+        set_transaction_note(mock_client, "txn_1", "acc_1", "item_1", None)
+
+
+class TestSetTransactionReviewed:
+    """Tests for set_transaction_reviewed."""
+
+    @respx.mock
+    def test_mark_reviewed(self, mock_client):
+        respx.post(BASE_URL).mock(
+            return_value=httpx.Response(200, json={
+                "data": {"bulkEditTransactions": {"updated": [{"id": "txn_1", "isReviewed": True, "__typename": "Transaction"}], "failed": [], "__typename": "BulkEditTransactionsPayload"}}
+            })
+        )
+
+        set_transaction_reviewed(mock_client, "txn_1", "acc_1", "item_1", True)
+
+    @respx.mock
+    def test_mark_unreviewed(self, mock_client):
+        respx.post(BASE_URL).mock(
+            return_value=httpx.Response(200, json={
+                "data": {"bulkEditTransactions": {"updated": [{"id": "txn_1", "isReviewed": False, "__typename": "Transaction"}], "failed": [], "__typename": "BulkEditTransactionsPayload"}}
+            })
+        )
+
+        set_transaction_reviewed(mock_client, "txn_1", "acc_1", "item_1", False)
+
+    @respx.mock
+    def test_failed_update_raises(self, mock_client):
+        respx.post(BASE_URL).mock(
+            return_value=httpx.Response(200, json={
+                "data": {"bulkEditTransactions": {"updated": [], "failed": [{"error": "Permission denied", "errorCode": "FORBIDDEN", "__typename": "BulkEditError"}], "__typename": "BulkEditTransactionsPayload"}}
+            })
+        )
+
+        with pytest.raises(CopilotAPIError, match="Permission denied"):
+            set_transaction_reviewed(mock_client, "txn_1", "acc_1", "item_1", True)

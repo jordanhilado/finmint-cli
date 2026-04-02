@@ -1,12 +1,18 @@
-"""Tests for finmint.sync — normalize_merchant and sync_month."""
+"""Tests for finmint.sync — normalize_merchant, sync_categories, and sync_month."""
 
 import sqlite3
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from finmint.db import get_transactions, init_db_with_conn, insert_transaction, seed_default_labels
-from finmint.sync import SyncResult, normalize_merchant, sync_month
+from finmint.db import (
+    get_labels,
+    get_transactions,
+    init_db_with_conn,
+    insert_transaction,
+    upsert_category,
+)
+from finmint.sync import SyncResult, normalize_merchant, sync_categories, sync_month
 from finmint.copilot import CopilotAuthError
 
 
@@ -50,16 +56,30 @@ def _make_copilot_txn(
     date: str,
     description: str = "Some Merchant",
     source_type: str = "card_payment",
+    item_id: str = "item_001",
+    category_id: str | None = None,
+    is_reviewed: bool = False,
+    user_notes: str | None = None,
 ) -> dict:
     """Build a fake Copilot transaction dict (amounts already in cents)."""
     return {
         "id": txn_id,
         "account_id": account_id,
+        "item_id": item_id,
         "amount": amount,
         "date": date,
         "description": description,
         "source_type": source_type,
+        "category_id": category_id,
+        "is_reviewed": is_reviewed,
+        "user_notes": user_notes,
     }
+
+
+FAKE_CATEGORIES = [
+    {"id": "cat-groc", "name": "Groceries", "color": "green", "icon": "🛒"},
+    {"id": "cat-din", "name": "Dining", "color": "red", "icon": "🍽️"},
+]
 
 
 # ---------------------------------------------------------------------------
@@ -105,14 +125,40 @@ class TestNormalizeMerchant:
 # ---------------------------------------------------------------------------
 
 
+class TestSyncCategories:
+    """Tests for sync_categories()."""
+
+    @pytest.fixture(autouse=True)
+    def setup_db(self, in_memory_db: sqlite3.Connection):
+        init_db_with_conn(in_memory_db)
+        self.conn = in_memory_db
+
+    @patch("finmint.sync.get_token", return_value="fake-jwt-token")
+    @patch("finmint.sync.copilot")
+    def test_sync_categories_upserts_labels(self, mock_copilot, _mock_get_token):
+        mock_client = MagicMock()
+        mock_copilot.create_client.return_value.__enter__ = MagicMock(return_value=mock_client)
+        mock_copilot.create_client.return_value.__exit__ = MagicMock(return_value=False)
+        mock_copilot.fetch_categories.return_value = FAKE_CATEGORIES
+
+        count = sync_categories(self.conn)
+
+        assert count == 2
+        labels = get_labels(self.conn)
+        assert len(labels) == 2
+        assert labels[0]["name"] == "Groceries"
+        assert labels[0]["copilot_id"] == "cat-groc"
+
+
 class TestSyncMonth:
     """Tests for sync_month()."""
 
     @pytest.fixture(autouse=True)
     def setup_db(self, in_memory_db: sqlite3.Connection):
-        """Initialize schema and seed data for every test."""
+        """Initialize schema and seed categories for every test."""
         init_db_with_conn(in_memory_db)
-        seed_default_labels(in_memory_db)
+        for cat in FAKE_CATEGORIES:
+            upsert_category(in_memory_db, cat["id"], cat["name"], cat.get("color"), cat.get("icon"))
         self.conn = in_memory_db
 
     # -- Happy path: discovers accounts, fetches transactions, upserts both --
@@ -131,6 +177,7 @@ class TestSyncMonth:
         mock_client = MagicMock()
         mock_copilot.create_client.return_value.__enter__ = MagicMock(return_value=mock_client)
         mock_copilot.create_client.return_value.__exit__ = MagicMock(return_value=False)
+        mock_copilot.fetch_categories.return_value = FAKE_CATEGORIES
         mock_copilot.fetch_accounts.return_value = fake_accounts
         mock_copilot.fetch_transactions.return_value = fake_txns
         mock_copilot.CopilotAuthError = CopilotAuthError
@@ -185,6 +232,7 @@ class TestSyncMonth:
         mock_client = MagicMock()
         mock_copilot.create_client.return_value.__enter__ = MagicMock(return_value=mock_client)
         mock_copilot.create_client.return_value.__exit__ = MagicMock(return_value=False)
+        mock_copilot.fetch_categories.return_value = FAKE_CATEGORIES
         mock_copilot.fetch_accounts.return_value = fake_accounts
         mock_copilot.fetch_transactions.return_value = fake_txns
         mock_copilot.CopilotAuthError = CopilotAuthError
@@ -204,6 +252,7 @@ class TestSyncMonth:
         mock_client = MagicMock()
         mock_copilot.create_client.return_value.__enter__ = MagicMock(return_value=mock_client)
         mock_copilot.create_client.return_value.__exit__ = MagicMock(return_value=False)
+        mock_copilot.fetch_categories.return_value = FAKE_CATEGORIES
         mock_copilot.fetch_accounts.return_value = []
         mock_copilot.fetch_transactions.return_value = []
         mock_copilot.CopilotAuthError = CopilotAuthError
@@ -243,6 +292,7 @@ class TestSyncMonth:
         mock_client = MagicMock()
         mock_copilot.create_client.return_value.__enter__ = MagicMock(return_value=mock_client)
         mock_copilot.create_client.return_value.__exit__ = MagicMock(return_value=False)
+        mock_copilot.fetch_categories.return_value = FAKE_CATEGORIES
         mock_copilot.fetch_accounts.return_value = fake_accounts
         mock_copilot.fetch_transactions.return_value = fake_txns
         mock_copilot.CopilotAuthError = CopilotAuthError
@@ -313,6 +363,7 @@ class TestSyncMonth:
         mock_client = MagicMock()
         mock_copilot.create_client.return_value.__enter__ = MagicMock(return_value=mock_client)
         mock_copilot.create_client.return_value.__exit__ = MagicMock(return_value=False)
+        mock_copilot.fetch_categories.return_value = FAKE_CATEGORIES
         mock_copilot.fetch_accounts.return_value = fake_accounts
         mock_copilot.fetch_transactions.return_value = fake_txns
         mock_copilot.CopilotAuthError = CopilotAuthError

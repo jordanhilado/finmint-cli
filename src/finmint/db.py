@@ -8,30 +8,6 @@ from typing import Optional
 from finmint.models import Transaction
 
 # ---------------------------------------------------------------------------
-# Default labels: all 16 are is_default=True; Transfer and Income are
-# is_protected=True.
-# ---------------------------------------------------------------------------
-
-DEFAULT_LABELS: list[tuple[str, bool]] = [
-    ("Groceries", False),
-    ("Dining Out", False),
-    ("Transport", False),
-    ("Housing", False),
-    ("Utilities", False),
-    ("Subscriptions", False),
-    ("Shopping", False),
-    ("Health", False),
-    ("Entertainment", False),
-    ("Income", True),
-    ("Travel", False),
-    ("Education", False),
-    ("Personal Care", False),
-    ("Gifts", False),
-    ("Fees & Interest", False),
-    ("Transfer", True),
-]
-
-# ---------------------------------------------------------------------------
 # Schema DDL
 # ---------------------------------------------------------------------------
 
@@ -47,7 +23,10 @@ CREATE TABLE IF NOT EXISTS accounts (
 
 CREATE TABLE IF NOT EXISTS labels (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    copilot_id TEXT UNIQUE,
     name TEXT UNIQUE NOT NULL,
+    color TEXT,
+    icon TEXT,
     is_default BOOLEAN DEFAULT 0,
     is_protected BOOLEAN DEFAULT 0,
     created_at TEXT
@@ -56,6 +35,7 @@ CREATE TABLE IF NOT EXISTS labels (
 CREATE TABLE IF NOT EXISTS transactions (
     id TEXT PRIMARY KEY,
     account_id TEXT REFERENCES accounts(id),
+    item_id TEXT,
     amount INTEGER NOT NULL,
     date TEXT NOT NULL,
     description TEXT,
@@ -65,6 +45,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     categorized_by TEXT,
     transfer_pair_id TEXT,
     source_type TEXT,
+    note TEXT,
     created_at TEXT
 );
 
@@ -113,36 +94,49 @@ def get_connection(path: Path | str = ":memory:") -> sqlite3.Connection:
     return conn
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns that may be missing from older databases."""
+    cur = conn.execute("PRAGMA table_info(transactions)")
+    txn_cols = {row[1] for row in cur.fetchall()}
+    if "source_type" not in txn_cols:
+        conn.execute("ALTER TABLE transactions ADD COLUMN source_type TEXT")
+        conn.commit()
+    if "note" not in txn_cols:
+        conn.execute("ALTER TABLE transactions ADD COLUMN note TEXT")
+        conn.commit()
+    if "item_id" not in txn_cols:
+        conn.execute("ALTER TABLE transactions ADD COLUMN item_id TEXT")
+        conn.commit()
+
+    cur = conn.execute("PRAGMA table_info(labels)")
+    label_cols = {row[1] for row in cur.fetchall()}
+    if "color" not in label_cols:
+        conn.execute("ALTER TABLE labels ADD COLUMN color TEXT")
+        conn.commit()
+    if "copilot_id" not in label_cols:
+        conn.execute("ALTER TABLE labels ADD COLUMN copilot_id TEXT UNIQUE")
+        conn.commit()
+    if "icon" not in label_cols:
+        conn.execute("ALTER TABLE labels ADD COLUMN icon TEXT")
+        conn.commit()
+
+
 def init_db(path: Path | str = ":memory:") -> sqlite3.Connection:
     """Create all tables and indexes (idempotent), return connection."""
     conn = get_connection(path)
     conn.executescript(_SCHEMA_SQL)
+    _migrate(conn)
     return conn
 
 
 def init_db_with_conn(conn: sqlite3.Connection) -> None:
     """Create all tables and indexes on an existing connection."""
     conn.executescript(_SCHEMA_SQL)
-
-
-# ---------------------------------------------------------------------------
-# Seed data
-# ---------------------------------------------------------------------------
+    _migrate(conn)
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def seed_default_labels(conn: sqlite3.Connection) -> None:
-    """Insert the 16 default labels. Idempotent via INSERT OR IGNORE."""
-    now = _now_iso()
-    conn.executemany(
-        "INSERT OR IGNORE INTO labels (name, is_default, is_protected, created_at) "
-        "VALUES (?, 1, ?, ?)",
-        [(name, is_protected, now) for name, is_protected in DEFAULT_LABELS],
-    )
-    conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +156,44 @@ def get_label_by_name(conn: sqlite3.Connection, name: str) -> Optional[sqlite3.R
     return cur.fetchone()
 
 
+def upsert_category(
+    conn: sqlite3.Connection,
+    copilot_id: str,
+    name: str,
+    color: str | None = None,
+    icon: str | None = None,
+) -> None:
+    """Insert or update a category from Copilot Money, keyed on copilot_id."""
+    now = _now_iso()
+    conn.execute(
+        "INSERT INTO labels (copilot_id, name, color, icon, created_at) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(copilot_id) DO UPDATE SET name=excluded.name, "
+        "color=excluded.color, icon=excluded.icon",
+        (copilot_id, name, color, icon, now),
+    )
+    conn.commit()
+
+
+def get_copilot_id_for_label(
+    conn: sqlite3.Connection, label_id: int
+) -> str | None:
+    """Look up the Copilot Money category ID for a local label ID."""
+    row = conn.execute(
+        "SELECT copilot_id FROM labels WHERE id = ?", (label_id,)
+    ).fetchone()
+    return row["copilot_id"] if row else None
+
+
+def get_label_by_copilot_id(
+    conn: sqlite3.Connection, copilot_id: str
+) -> sqlite3.Row | None:
+    """Look up a local label by its Copilot Money category ID."""
+    return conn.execute(
+        "SELECT * FROM labels WHERE copilot_id = ?", (copilot_id,)
+    ).fetchone()
+
+
 # ---------------------------------------------------------------------------
 # Transaction helpers
 # ---------------------------------------------------------------------------
@@ -172,13 +204,14 @@ def insert_transaction(conn: sqlite3.Connection, data: Transaction) -> None:
     now = _now_iso()
     conn.execute(
         "INSERT OR IGNORE INTO transactions "
-        "(id, account_id, amount, date, description, normalized_description, "
+        "(id, account_id, item_id, amount, date, description, normalized_description, "
         "label_id, review_status, categorized_by, transfer_pair_id, "
         "source_type, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             data["id"],
             data.get("account_id"),
+            data.get("item_id"),
             data["amount"],
             data["date"],
             data.get("description"),
@@ -224,7 +257,10 @@ def get_transactions(
         end = f"{year:04d}-{month + 1:02d}-01"
 
     cur = conn.execute(
-        "SELECT * FROM transactions WHERE date >= ? AND date < ? ORDER BY date",
+        "SELECT t.*, a.institution_name, a.last_four "
+        "FROM transactions t "
+        "LEFT JOIN accounts a ON t.account_id = a.id "
+        "WHERE t.date >= ? AND t.date < ? ORDER BY t.date",
         (start, end),
     )
     return cur.fetchall()
@@ -242,5 +278,18 @@ def update_transaction_label(
         "UPDATE transactions SET label_id = ?, categorized_by = ?, review_status = ? "
         "WHERE id = ?",
         (label_id, categorized_by, status, txn_id),
+    )
+    conn.commit()
+
+
+def update_transaction_note(
+    conn: sqlite3.Connection,
+    txn_id: str,
+    note: str | None,
+) -> None:
+    """Update a transaction's note. Pass None or empty string to clear."""
+    conn.execute(
+        "UPDATE transactions SET note = ? WHERE id = ?",
+        (note or None, txn_id),
     )
     conn.commit()

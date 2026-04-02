@@ -8,8 +8,9 @@ matplotlib.use("Agg")
 
 import pytest
 
-from finmint.db import init_db_with_conn, seed_default_labels, get_label_by_name
+from finmint.db import init_db_with_conn, get_label_by_name
 from finmint.charts import render_monthly_pie, render_yearly_bars, open_chart
+from tests.conftest import seed_test_categories
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +40,7 @@ def _insert_txn(conn, txn_id, date, amount_cents, label_name, review_status="rev
 def seeded_db(in_memory_db):
     """In-memory DB with schema and default labels."""
     init_db_with_conn(in_memory_db)
-    seed_default_labels(in_memory_db)
+    seed_test_categories(in_memory_db)
     return in_memory_db
 
 

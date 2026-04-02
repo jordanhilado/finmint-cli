@@ -8,7 +8,12 @@ from typing import TypedDict
 
 from finmint import copilot
 from finmint.config import get_token
-from finmint.db import insert_transaction, upsert_account
+from finmint.db import (
+    get_label_by_copilot_id,
+    insert_transaction,
+    upsert_account,
+    upsert_category,
+)
 
 
 class SyncResult(TypedDict):
@@ -58,6 +63,21 @@ def _is_current_month(month: int, year: int) -> bool:
     return now.month == month and now.year == year
 
 
+def sync_categories(conn: sqlite3.Connection) -> int:
+    """Fetch categories from Copilot Money and upsert into the labels table.
+
+    Returns the number of categories synced.
+    """
+    token = get_token()
+    with copilot.create_client(token) as client:
+        categories = copilot.fetch_categories(client)
+
+    for cat in categories:
+        upsert_category(conn, cat["id"], cat["name"], cat.get("color"), cat.get("icon"))
+
+    return len(categories)
+
+
 def sync_month(
     conn: sqlite3.Connection,
     config: dict,
@@ -88,10 +108,17 @@ def sync_month(
     if not current_month and not force and _has_transactions_for_month(conn, month, year):
         return result
 
-    token = get_token(config)
+    token = get_token()
 
     try:
         with copilot.create_client(token) as client:
+            # Sync categories first so we can map category IDs on transactions
+            categories = copilot.fetch_categories(client)
+            for cat in categories:
+                upsert_category(
+                    conn, cat["id"], cat["name"], cat.get("color"), cat.get("icon")
+                )
+
             # Fetch and upsert accounts
             accounts = copilot.fetch_accounts(client)
             for account in accounts:
@@ -121,13 +148,29 @@ def sync_month(
                 )
                 already_exists = cur.fetchone() is not None
 
+                # Map Copilot category ID to local label_id
+                label_id = None
+                copilot_cat_id = txn.get("category_id")
+                if copilot_cat_id:
+                    label_row = get_label_by_copilot_id(conn, copilot_cat_id)
+                    if label_row:
+                        label_id = label_row["id"]
+
+                # Map Copilot reviewed status
+                is_reviewed = txn.get("is_reviewed", False)
+                review_status = "reviewed" if is_reviewed else "needs_review"
+
                 insert_transaction(conn, {
                     "id": txn["id"],
                     "account_id": txn["account_id"],
+                    "item_id": txn.get("item_id"),
                     "amount": txn["amount"],
                     "date": txn["date"],
                     "description": raw_desc,
                     "normalized_description": normalized,
+                    "label_id": label_id,
+                    "review_status": review_status,
+                    "note": txn.get("user_notes"),
                     "source_type": txn["source_type"],
                 })
 

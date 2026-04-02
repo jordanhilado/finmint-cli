@@ -7,6 +7,7 @@ import pytest
 
 from finmint import db
 from finmint.transfers import detect_transfers
+from tests.conftest import seed_test_categories
 
 
 # ---------------------------------------------------------------------------
@@ -17,7 +18,7 @@ from finmint.transfers import detect_transfers
 def _setup_db(conn: sqlite3.Connection) -> None:
     """Initialize schema and seed default labels."""
     db.init_db_with_conn(conn)
-    db.seed_default_labels(conn)
+    seed_test_categories(conn)
 
 
 def _insert_account(conn: sqlite3.Connection, account_id: str) -> None:

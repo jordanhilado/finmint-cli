@@ -14,7 +14,10 @@ class Account(TypedDict, total=False):
 
 class Label(TypedDict, total=False):
     id: int
+    copilot_id: str  # Copilot Money category UUID
     name: str
+    color: str
+    icon: str  # Emoji/icon from Copilot Money
     is_default: bool
     is_protected: bool
     created_at: str
@@ -23,7 +26,8 @@ class Label(TypedDict, total=False):
 class Transaction(TypedDict, total=False):
     id: str
     account_id: str
-    amount: int  # cents (negative = debit)
+    item_id: str  # Copilot Money itemId (required for mutations)
+    amount: int  # cents (positive = debit, negative = credit)
     date: str
     description: str
     normalized_description: str
@@ -32,6 +36,7 @@ class Transaction(TypedDict, total=False):
     categorized_by: str
     transfer_pair_id: str
     source_type: str
+    note: str
     created_at: str
 
 

@@ -5,6 +5,7 @@ to coexist with named subcommands like `finmint view`, `finmint labels`, etc.
 """
 
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
@@ -47,9 +48,10 @@ def version_callback(value: bool):
 
 
 def _ensure_setup() -> tuple:
-    """Load config, init DB, return (config, conn)."""
+    """Load config, init DB, sync categories from Copilot Money, return (config, conn)."""
     from finmint.config import load_config, validate_config, check_permissions
-    from finmint.db import init_db, seed_default_labels
+    from finmint.db import init_db
+    from finmint.sync import sync_categories
 
     check_permissions()
 
@@ -61,7 +63,13 @@ def _ensure_setup() -> tuple:
         raise typer.Exit(code=1)
 
     conn = init_db(str(DB_PATH))
-    seed_default_labels(conn)
+
+    # Fetch categories from Copilot Money; fall back to existing DB labels if offline
+    try:
+        sync_categories(conn)
+    except Exception:
+        pass  # Categories from a previous sync remain in the DB
+
     return config, conn
 
 
@@ -76,7 +84,7 @@ def main(
 @app.command()
 def review(
     period: str = typer.Argument(..., help="Month to review (e.g., 3-2026)"),
-    force_sync: bool = typer.Option(False, "--force-sync", help="Re-fetch even if already synced"),
+    force_sync: bool = typer.Option(False, "--sync", help="Re-fetch even if already synced"),
 ):
     """Review and categorize transactions for a given month."""
     month, year = _parse_period(period)
@@ -111,9 +119,10 @@ def review(
     )
 
     # Step 3: Launch review TUI
+    from finmint.config import get_token
     from finmint.review_tui import ReviewApp
 
-    tui = ReviewApp(conn, month, year)
+    tui = ReviewApp(conn, month, year, copilot_token=get_token())
     tui.run()
 
 
@@ -194,20 +203,28 @@ def view(
 
 @app.command()
 def token():
-    """Set your Copilot Money JWT token."""
-    from finmint.config import save_token
+    """Set or validate your Copilot Money JWT token."""
+    from finmint.config import get_token, save_token, _token_path
     from finmint.copilot import create_client, fetch_accounts, CopilotAuthError
 
-    console.print(
-        "Paste your Copilot Money JWT token.\n"
-        "Find it in browser dev tools: Network tab → any graphql request → Authorization header.\n"
-    )
-    jwt = console.input("[bold]Token:[/bold] ").strip()
-    if jwt.startswith("Bearer "):
-        jwt = jwt[7:]
+    token_file = _token_path()
 
-    if not jwt:
-        console.print("[red]No token provided.[/red]")
+    if not token_file.exists():
+        save_token("", home=None)
+        console.print(f"Created token file: [bold]{token_file}[/bold]\n")
+
+    console.print(
+        f"Paste your Copilot Money JWT into [bold]{token_file}[/bold]\n"
+        "Find it in browser dev tools: Network tab → any graphql request → Authorization header.\n"
+        "You can include or omit the 'Bearer ' prefix.\n"
+    )
+    subprocess.run(["open", str(token_file)])
+    console.input("[dim]Press Enter once you've saved the file...[/dim]")
+
+    try:
+        jwt = get_token()
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/red]")
         raise typer.Exit(code=1)
 
     # Validate by making a test API call
@@ -222,9 +239,114 @@ def token():
             console.print(f"[red]Failed to validate token: {e}[/red]")
             raise typer.Exit(code=1)
 
-    path = save_token(jwt)
-    console.print(f"[green]Token saved to {path}[/green]")
+    console.print(f"[green]Token validated ({token_file})[/green]")
     console.print(f"Found {len(accts)} connected accounts.")
+
+
+@app.command()
+def reset(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+):
+    """Reset all reviews, categories, and AI data to start fresh.
+
+    Clears all transaction labels, review statuses, notes, and transfer
+    pairings. Deletes cached AI summaries and AI-learned merchant rules.
+    Your synced transactions, accounts, labels, and manual rules are kept.
+    """
+    _, conn = _ensure_setup()
+
+    # Show what will be affected
+    txn_count = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+    reviewed = conn.execute(
+        "SELECT COUNT(*) FROM transactions WHERE review_status = 'reviewed'"
+    ).fetchone()[0]
+    ai_summaries = conn.execute("SELECT COUNT(*) FROM ai_summaries").fetchone()[0]
+    ai_rules = conn.execute(
+        "SELECT COUNT(*) FROM merchant_rules WHERE source = 'ai'"
+    ).fetchone()[0]
+
+    if txn_count == 0:
+        console.print("[yellow]Nothing to reset — no transactions found.[/yellow]")
+        raise typer.Exit()
+
+    console.print("[bold]This will reset:[/bold]")
+    console.print(f"  • {txn_count} transactions → labels, review status, notes cleared")
+    console.print(f"    ({reviewed} currently reviewed)")
+    console.print(f"  • {ai_summaries} cached AI summaries → deleted")
+    console.print(f"  • {ai_rules} AI-learned merchant rules → deleted")
+    console.print()
+    console.print("[dim]Kept: synced transactions, accounts, labels, manual rules.[/dim]")
+
+    if not yes:
+        confirm = console.input("\n[bold red]Type 'reset' to confirm:[/bold red] ")
+        if confirm.strip() != "reset":
+            console.print("Aborted.")
+            raise typer.Exit()
+
+    # Reset all transaction review state
+    conn.execute(
+        "UPDATE transactions SET "
+        "label_id = NULL, "
+        "review_status = 'needs_review', "
+        "categorized_by = NULL, "
+        "transfer_pair_id = NULL, "
+        "note = NULL"
+    )
+    # Delete AI summaries
+    conn.execute("DELETE FROM ai_summaries")
+    # Delete AI-learned merchant rules (keep manual ones)
+    conn.execute("DELETE FROM merchant_rules WHERE source = 'ai'")
+    conn.commit()
+
+    console.print(f"\n[green]Reset complete. {txn_count} transactions ready for fresh review.[/green]")
+
+
+@app.command(name="check-key")
+def check_key():
+    """Validate that the Anthropic API key is configured and working."""
+    from finmint.config import load_config, validate_config, check_permissions, resolve_api_key
+
+    check_permissions()
+
+    try:
+        config = load_config()
+        validate_config(config)
+    except (FileNotFoundError, ValueError) as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1)
+
+    try:
+        api_key = resolve_api_key(config)
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(code=1)
+
+    env_var = config["claude"]["api_key_env"]
+    masked = api_key[:7] + "..." + api_key[-4:]
+    console.print(f"Found key in [bold]${env_var}[/bold]: {masked}")
+
+    # Make a minimal API call to verify the key works
+    import anthropic
+
+    with Status("[bold]Validating key with Anthropic API...", console=console):
+        try:
+            client = anthropic.Anthropic(api_key=api_key)
+            resp = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1,
+                messages=[{"role": "user", "content": "hi"}],
+            )
+        except anthropic.AuthenticationError:
+            console.print("[red]Key is invalid. Check your API key and try again.[/red]")
+            raise typer.Exit(code=1)
+        except anthropic.PermissionError:
+            console.print("[red]Key lacks permissions. Check your Anthropic dashboard.[/red]")
+            raise typer.Exit(code=1)
+        except Exception as e:
+            console.print(f"[red]API call failed: {e}[/red]")
+            raise typer.Exit(code=1)
+
+    console.print("[green]Anthropic API key is valid and working.[/green]")
 
 
 @app.command()
@@ -235,6 +357,7 @@ def labels():
 
     tui = LabelsApp(conn)
     tui.run()
+
 
 
 @app.command()

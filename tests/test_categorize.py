@@ -8,12 +8,12 @@ import pytest
 from finmint.categorize import categorize_month
 from finmint.db import (
     init_db,
-    seed_default_labels,
     insert_transaction,
     get_transactions,
 )
 from finmint.rules import add_rule
 from finmint.db import get_label_by_name
+from tests.conftest import seed_test_categories
 
 
 # ---------------------------------------------------------------------------
@@ -24,7 +24,7 @@ from finmint.db import get_label_by_name
 def _setup_db() -> sqlite3.Connection:
     """Create an in-memory DB with schema, default labels, and a test account."""
     conn = init_db(":memory:")
-    seed_default_labels(conn)
+    seed_test_categories(conn)
     conn.execute(
         "INSERT INTO accounts (id, institution_name, account_type, last_four) "
         "VALUES (?, ?, ?, ?)",

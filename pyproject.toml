@@ -5,6 +5,22 @@ description = "Terminal-based personal finance tool with Copilot Money integrati
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.11"
+authors = [
+    {name = "Jordan Hilado", email = "jordanalihilado@gmail.com"},
+]
+keywords = ["finance", "budgeting", "terminal", "cli", "tui", "copilot-money"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial",
+]
 dependencies = [
     "typer>=0.9",
     "rich>=13.0",
@@ -15,6 +31,11 @@ dependencies = [
     "pyyaml>=6.0",
     "anthropic>=0.18",
 ]
+
+[project.urls]
+Homepage = "https://github.com/jordanhilado/finmint"
+Repository = "https://github.com/jordanhilado/finmint"
+Issues = "https://github.com/jordanhilado/finmint/issues"
 
 [project.scripts]
 finmint = "finmint.cli:app"

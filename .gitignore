@@ -18,16 +18,25 @@ env/
 *.swp
 *.swo
 
-# Secrets and certificates
+# Secrets and certificates -- NEVER commit these
 .env
+.env.*
 *.pem
 *.crt
 *.key
+*.p12
+*.pfx
+*.jks
 
-# Finmint local data (never commit)
+# Finmint local data (contains credentials and personal financial data)
 .finmint/
+
+# Legacy Teller files (should not exist but block just in case)
 teller/
 teller.zip
+
+# Claude Code
+.claude/
 
 # OS
 .DS_Store
@@ -37,3 +46,11 @@ Thumbs.db
 .pytest_cache/
 htmlcov/
 .coverage
+.coverage.*
+
+# SQLite databases
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3

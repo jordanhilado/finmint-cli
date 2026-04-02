@@ -13,6 +13,7 @@ from typing import Optional
 import typer
 from typer.core import TyperGroup
 from rich.console import Console
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, MofNCompleteColumn
 from rich.status import Status
 
 from finmint import __version__
@@ -93,23 +94,70 @@ def review(
     # Step 1: Sync
     from finmint.sync import sync_month
 
-    with Status("[bold]Syncing transactions from Copilot Money...", console=console):
-        result = sync_month(conn, config, month, year, force=force_sync)
+    sync_task_id = None
+    sync_tasks: dict[str, int] = {}
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        console=console,
+    ) as progress:
+        sync_task_id = progress.add_task("Syncing from Copilot Money", total=None)
+
+        def sync_progress(step: str, current: int, total: int) -> None:
+            if step not in sync_tasks:
+                sync_tasks[step] = progress.add_task(f"  {step}", total=total)
+            task = sync_tasks[step]
+            progress.update(task, total=total, completed=current)
+
+        result = sync_month(conn, config, month, year, force=force_sync, on_progress=sync_progress)
+        progress.update(sync_task_id, total=1, completed=1)
 
     if result["error"]:
         console.print(f"[red]{result['error']}[/red]")
         raise typer.Exit(code=1)
 
-    console.print(
-        f"Synced {result['total_fetched']} transactions "
-        f"({result['new_count']} new)."
-    )
+    from finmint.db import get_transactions
+
+    if result["total_fetched"] == 0 and result["new_count"] == 0:
+        existing = get_transactions(conn, month, year)
+        if existing:
+            console.print(
+                f"Already synced — {len(existing)} transactions on file. "
+                f"Use [bold]--sync[/bold] to re-fetch."
+            )
+        else:
+            console.print("No transactions found for this period.")
+    else:
+        console.print(
+            f"Synced {result['total_fetched']} transactions "
+            f"({result['new_count']} new)."
+        )
 
     # Step 2: Categorize
     from finmint.categorize import categorize_month
 
-    with Status("[bold]Categorizing transactions...", console=console):
-        cat_result = categorize_month(conn, config, month, year)
+    cat_tasks: dict[str, int] = {}
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        console=console,
+    ) as progress:
+        cat_main = progress.add_task("Categorizing transactions", total=None)
+
+        def cat_progress(step: str, current: int, total: int) -> None:
+            if step not in cat_tasks:
+                cat_tasks[step] = progress.add_task(f"  {step}", total=total)
+            task = cat_tasks[step]
+            progress.update(task, total=total, completed=current)
+
+        cat_result = categorize_month(conn, config, month, year, on_progress=cat_progress)
+        progress.update(cat_main, total=1, completed=1)
 
     console.print(
         f"Categorized: {cat_result['rule_matched']} by rules, "
@@ -250,8 +298,8 @@ def reset(
     """Reset all reviews, categories, and AI data to start fresh.
 
     Clears all transaction labels, review statuses, notes, and transfer
-    pairings. Deletes cached AI summaries and AI-learned merchant rules.
-    Your synced transactions, accounts, labels, and manual rules are kept.
+    pairings. Deletes cached AI summaries.
+    Your synced transactions, accounts, and labels are kept.
     """
     _, conn = _ensure_setup()
 
@@ -261,9 +309,6 @@ def reset(
         "SELECT COUNT(*) FROM transactions WHERE review_status = 'reviewed'"
     ).fetchone()[0]
     ai_summaries = conn.execute("SELECT COUNT(*) FROM ai_summaries").fetchone()[0]
-    ai_rules = conn.execute(
-        "SELECT COUNT(*) FROM merchant_rules WHERE source = 'ai'"
-    ).fetchone()[0]
 
     if txn_count == 0:
         console.print("[yellow]Nothing to reset — no transactions found.[/yellow]")
@@ -273,9 +318,8 @@ def reset(
     console.print(f"  • {txn_count} transactions → labels, review status, notes cleared")
     console.print(f"    ({reviewed} currently reviewed)")
     console.print(f"  • {ai_summaries} cached AI summaries → deleted")
-    console.print(f"  • {ai_rules} AI-learned merchant rules → deleted")
     console.print()
-    console.print("[dim]Kept: synced transactions, accounts, labels, manual rules.[/dim]")
+    console.print("[dim]Kept: synced transactions, accounts, labels.[/dim]")
 
     if not yes:
         confirm = console.input("\n[bold red]Type 'reset' to confirm:[/bold red] ")
@@ -294,8 +338,6 @@ def reset(
     )
     # Delete AI summaries
     conn.execute("DELETE FROM ai_summaries")
-    # Delete AI-learned merchant rules (keep manual ones)
-    conn.execute("DELETE FROM merchant_rules WHERE source = 'ai'")
     conn.commit()
 
     console.print(f"\n[green]Reset complete. {txn_count} transactions ready for fresh review.[/green]")
@@ -368,6 +410,43 @@ def accounts():
 
     tui = AccountsApp(conn)
     tui.run()
+
+
+@app.command()
+def clear(
+    period: str = typer.Argument(..., help="Month to clear (e.g., 3-2026)"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+):
+    """Delete all imported data for a month so it can be re-fetched.
+
+    Removes all transactions and AI summaries for the given month.
+    Run `finmint <M-YYYY>` afterwards to re-sync from Copilot Money.
+    """
+    month, year = _parse_period(period)
+    _, conn = _ensure_setup()
+
+    from finmint.db import get_transactions, delete_transactions_for_month
+
+    txns = get_transactions(conn, month, year)
+    if not txns:
+        console.print(f"[yellow]No data for {month}/{year} — nothing to clear.[/yellow]")
+        raise typer.Exit()
+
+    reviewed = sum(1 for t in txns if t["review_status"] in ("reviewed", "auto_accepted"))
+    console.print(f"[bold]This will delete {len(txns)} transactions for {month}/{year}.[/bold]")
+    console.print(f"  ({reviewed} reviewed, {len(txns) - reviewed} unreviewed)")
+
+    if not yes:
+        confirm = console.input(f"\n[bold red]Type 'clear' to confirm:[/bold red] ")
+        if confirm.strip() != "clear":
+            console.print("Aborted.")
+            raise typer.Exit()
+
+    deleted = delete_transactions_for_month(conn, month, year)
+    console.print(
+        f"\n[green]Cleared {deleted} transactions for {month}/{year}.[/green]\n"
+        f"Run [bold]finmint {month}-{year}[/bold] to re-sync."
+    )
 
 
 @app.command()

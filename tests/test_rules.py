@@ -1,4 +1,4 @@
-"""Tests for the merchant rules engine."""
+"""Tests for the Copilot-derived merchant rules engine."""
 
 from finmint import db, rules
 from tests.conftest import seed_test_categories
@@ -29,50 +29,16 @@ def _insert_txn(conn, txn_id, date, normalized_description, label_id=None):
     })
 
 
-class TestAddRule:
-    def test_stores_normalized_uppercase_pattern(self, in_memory_db):
-        _setup(in_memory_db)
-        label_id = _get_label_id(in_memory_db, "Groceries")
-
-        rule_id = rules.add_rule(in_memory_db, "trader joe", label_id)
-
-        row = in_memory_db.execute(
-            "SELECT * FROM merchant_rules WHERE id = ?", (rule_id,)
-        ).fetchone()
-        assert row is not None
-        assert row["pattern"] == "TRADER JOE"
-        assert row["label_id"] == label_id
-        assert row["source"] == "manual"
-
-    def test_duplicate_pattern_updates_existing_rule(self, in_memory_db):
-        _setup(in_memory_db)
-        groceries_id = _get_label_id(in_memory_db, "Groceries")
-        dining_id = _get_label_id(in_memory_db, "Dining Out")
-
-        rule_id_1 = rules.add_rule(in_memory_db, "trader joe", groceries_id)
-        rule_id_2 = rules.add_rule(in_memory_db, "TRADER JOE", dining_id)
-
-        # Same rule row updated, not a new one
-        assert rule_id_1 == rule_id_2
-
-        row = in_memory_db.execute(
-            "SELECT * FROM merchant_rules WHERE id = ?", (rule_id_1,)
-        ).fetchone()
-        assert row["label_id"] == dining_id
-
-        # Only one rule exists
-        count = in_memory_db.execute(
-            "SELECT COUNT(*) as c FROM merchant_rules"
-        ).fetchone()["c"]
-        assert count == 1
-
-
 class TestMatchRules:
-    def test_finds_correct_rule_by_substring(self, in_memory_db):
+    def test_derives_rule_from_categorized_transactions(self, in_memory_db):
         _setup(in_memory_db)
         groceries_id = _get_label_id(in_memory_db, "Groceries")
 
-        rules.add_rule(in_memory_db, "TRADER JOE", groceries_id)
+        # A previously categorized transaction acts as a rule
+        _insert_txn(
+            in_memory_db, "txn-old", "2026-02-10",
+            "TRADER JOE", label_id=groceries_id,
+        )
 
         result = rules.match_rules(in_memory_db, "TRADER JOE #123 SAN FRANCISCO")
         assert result is not None
@@ -83,8 +49,16 @@ class TestMatchRules:
         groceries_id = _get_label_id(in_memory_db, "Groceries")
         shopping_id = _get_label_id(in_memory_db, "Shopping")
 
-        rules.add_rule(in_memory_db, "TRADER", shopping_id)
-        rules.add_rule(in_memory_db, "TRADER JOE", groceries_id)
+        # Short match
+        _insert_txn(
+            in_memory_db, "txn-1", "2026-02-10",
+            "TRADER", label_id=shopping_id,
+        )
+        # Longer match
+        _insert_txn(
+            in_memory_db, "txn-2", "2026-02-11",
+            "TRADER JOE", label_id=groceries_id,
+        )
 
         result = rules.match_rules(in_memory_db, "TRADER JOE #456")
         assert result is not None
@@ -95,63 +69,45 @@ class TestMatchRules:
         _setup(in_memory_db)
         groceries_id = _get_label_id(in_memory_db, "Groceries")
 
-        rules.add_rule(in_memory_db, "TRADER JOE", groceries_id)
+        _insert_txn(
+            in_memory_db, "txn-1", "2026-02-10",
+            "TRADER JOE", label_id=groceries_id,
+        )
 
         result = rules.match_rules(in_memory_db, "WHOLE FOODS MARKET")
         assert result is None
 
-    def test_case_insensitive_matching(self, in_memory_db):
-        _setup(in_memory_db)
-        groceries_id = _get_label_id(in_memory_db, "Groceries")
-
-        rules.add_rule(in_memory_db, "trader joe", groceries_id)
-
-        result = rules.match_rules(in_memory_db, "trader joe #123")
-        assert result is not None
-        assert result["label_id"] == groceries_id
-
-
-class TestDeleteRule:
-    def test_does_not_affect_transactions(self, in_memory_db):
-        _setup(in_memory_db)
-        groceries_id = _get_label_id(in_memory_db, "Groceries")
-
-        rule_id = rules.add_rule(in_memory_db, "TRADER JOE", groceries_id)
-
-        # Insert a transaction that was categorized by this rule
-        _insert_txn(
-            in_memory_db, "txn-1", "2026-03-15",
-            "TRADER JOE #123", label_id=groceries_id,
-        )
-
-        rules.delete_rule(in_memory_db, rule_id)
-
-        # Rule is gone
-        row = in_memory_db.execute(
-            "SELECT * FROM merchant_rules WHERE id = ?", (rule_id,)
-        ).fetchone()
-        assert row is None
-
-        # Transaction still has its label
-        txn = in_memory_db.execute(
-            "SELECT * FROM transactions WHERE id = 'txn-1'"
-        ).fetchone()
-        assert txn["label_id"] == groceries_id
-
-
-class TestUpdateRule:
-    def test_updates_label(self, in_memory_db):
+    def test_most_frequent_category_wins(self, in_memory_db):
         _setup(in_memory_db)
         groceries_id = _get_label_id(in_memory_db, "Groceries")
         dining_id = _get_label_id(in_memory_db, "Dining Out")
 
-        rule_id = rules.add_rule(in_memory_db, "CHIPOTLE", groceries_id)
-        rules.update_rule(in_memory_db, rule_id, dining_id)
+        # 2 transactions as Groceries, 1 as Dining
+        _insert_txn(
+            in_memory_db, "txn-1", "2026-02-10",
+            "TRADER JOE", label_id=groceries_id,
+        )
+        _insert_txn(
+            in_memory_db, "txn-2", "2026-02-11",
+            "TRADER JOE", label_id=groceries_id,
+        )
+        _insert_txn(
+            in_memory_db, "txn-3", "2026-02-12",
+            "TRADER JOE", label_id=dining_id,
+        )
 
-        row = in_memory_db.execute(
-            "SELECT * FROM merchant_rules WHERE id = ?", (rule_id,)
-        ).fetchone()
-        assert row["label_id"] == dining_id
+        result = rules.match_rules(in_memory_db, "TRADER JOE #999")
+        assert result is not None
+        assert result["label_id"] == groceries_id
+
+    def test_uncategorized_transactions_not_used_as_rules(self, in_memory_db):
+        _setup(in_memory_db)
+
+        # Transaction with no label — should not generate a rule
+        _insert_txn(in_memory_db, "txn-1", "2026-02-10", "TRADER JOE")
+
+        result = rules.match_rules(in_memory_db, "TRADER JOE #123")
+        assert result is None
 
 
 class TestGetAllRules:
@@ -160,8 +116,14 @@ class TestGetAllRules:
         groceries_id = _get_label_id(in_memory_db, "Groceries")
         dining_id = _get_label_id(in_memory_db, "Dining Out")
 
-        rules.add_rule(in_memory_db, "TRADER JOE", groceries_id)
-        rules.add_rule(in_memory_db, "CHIPOTLE", dining_id)
+        _insert_txn(
+            in_memory_db, "txn-1", "2026-02-10",
+            "TRADER JOE", label_id=groceries_id,
+        )
+        _insert_txn(
+            in_memory_db, "txn-2", "2026-02-11",
+            "CHIPOTLE", label_id=dining_id,
+        )
 
         all_rules = rules.get_all_rules(in_memory_db)
         assert len(all_rules) == 2
@@ -171,17 +133,41 @@ class TestGetAllRules:
         assert all_rules[1]["pattern"] == "TRADER JOE"
         assert all_rules[1]["label_name"] == "Groceries"
 
+    def test_includes_transaction_count(self, in_memory_db):
+        _setup(in_memory_db)
+        groceries_id = _get_label_id(in_memory_db, "Groceries")
+
+        _insert_txn(
+            in_memory_db, "txn-1", "2026-02-10",
+            "TRADER JOE", label_id=groceries_id,
+        )
+        _insert_txn(
+            in_memory_db, "txn-2", "2026-02-11",
+            "TRADER JOE", label_id=groceries_id,
+        )
+
+        all_rules = rules.get_all_rules(in_memory_db)
+        assert len(all_rules) == 1
+        assert all_rules[0]["txn_count"] == 2
+
 
 class TestApplyRulesToTransactions:
-    def test_categorizes_matching_transactions(self, in_memory_db):
+    def test_categorizes_from_copilot_derived_rules(self, in_memory_db):
         _setup(in_memory_db)
         groceries_id = _get_label_id(in_memory_db, "Groceries")
         dining_id = _get_label_id(in_memory_db, "Dining Out")
 
-        rules.add_rule(in_memory_db, "TRADER JOE", groceries_id)
-        rules.add_rule(in_memory_db, "CHIPOTLE", dining_id)
+        # Previously categorized transactions (from Copilot or earlier months)
+        _insert_txn(
+            in_memory_db, "txn-old-1", "2026-02-10",
+            "TRADER JOE", label_id=groceries_id,
+        )
+        _insert_txn(
+            in_memory_db, "txn-old-2", "2026-02-11",
+            "CHIPOTLE", label_id=dining_id,
+        )
 
-        # Uncategorized transactions
+        # Uncategorized transactions for March
         _insert_txn(in_memory_db, "txn-1", "2026-03-10", "TRADER JOE #123")
         _insert_txn(in_memory_db, "txn-2", "2026-03-15", "CHIPOTLE ONLINE")
         _insert_txn(in_memory_db, "txn-3", "2026-03-20", "UNKNOWN MERCHANT")

@@ -1,6 +1,7 @@
 """Categorization orchestrator: rules -> transfers -> AI pipeline."""
 
 import sqlite3
+from typing import Callable
 
 from finmint.db import get_transactions
 from finmint.rules import apply_rules_to_transactions
@@ -13,6 +14,7 @@ def categorize_month(
     config: dict,
     month: int,
     year: int,
+    on_progress: "Callable[[str, int, int], None] | None" = None,
 ) -> dict:
     """Run the full categorization pipeline for a given month.
 
@@ -27,11 +29,19 @@ def categorize_month(
       rule_matched (int), transfers_detected (int),
       ai_categorized (int), uncategorized (int)
     """
+    def _progress(step: str, current: int, total: int) -> None:
+        if on_progress:
+            on_progress(step, current, total)
+
     # Step 1: Apply merchant rules
+    _progress("Applying rules", 0, 1)
     rule_matched = apply_rules_to_transactions(conn, month, year)
+    _progress("Applying rules", 1, 1)
 
     # Step 2: Detect transfers
+    _progress("Detecting transfers", 0, 1)
     transfers_detected = detect_transfers(conn, month, year)
+    _progress("Detecting transfers", 1, 1)
 
     # Step 3: Send remaining uncategorized to AI
     # Only pass transactions where categorized_by is None and
@@ -44,7 +54,9 @@ def categorize_month(
 
     ai_categorized = 0
     if uncategorized_txns:
+        _progress("AI categorizing", 0, 1)
         ai_categorized = categorize_transactions(config, conn, uncategorized_txns)
+        _progress("AI categorizing", 1, 1)
 
     # Count final uncategorized (re-query to get fresh state)
     final_txns = get_transactions(conn, month, year)

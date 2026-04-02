@@ -5,8 +5,8 @@ import sqlite3
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
-from textual.widgets import DataTable, Footer, Header, Input, Label, OptionList, Static
+from textual.containers import Horizontal, Vertical
+from textual.widgets import DataTable, Footer, Header, Input, Label, OptionList, ProgressBar, Static
 from textual.widgets.option_list import Option
 from textual.screen import ModalScreen, Screen
 
@@ -18,7 +18,6 @@ from finmint.db import (
     update_transaction_label,
     update_transaction_note,
 )
-from finmint.rules import add_rule
 
 # ---------------------------------------------------------------------------
 # Sort column definitions
@@ -163,9 +162,101 @@ class OneByOneScreen(Screen):
         Binding("e", "exempt", "Exempt"),
         Binding("n", "edit_note", "Note"),
         Binding("s", "skip", "Skip"),
+        Binding("up,k", "prev_txn", "Prev"),
+        Binding("down,j", "next_txn", "Next"),
         Binding("t", "toggle_mode", "Table View"),
         Binding("q", "quit_review", "Quit"),
     ]
+
+    CSS = """
+    OneByOneScreen {
+        align: center middle;
+    }
+    #obo-outer {
+        width: 100%;
+        height: 100%;
+        align: center middle;
+    }
+    #obo-progress-line {
+        text-align: center;
+        width: 64;
+        height: 1;
+        margin-bottom: 1;
+        color: $text-muted;
+    }
+    #obo-progress-bar {
+        width: 64;
+    }
+    .preview-card {
+        width: 64;
+        height: 3;
+        padding: 0 2;
+        background: $surface;
+        border: round $primary-background-darken-2;
+        color: $text-muted;
+        content-align: center middle;
+    }
+    .preview-hidden {
+        width: 64;
+        height: 1;
+    }
+    #prev-label, #next-label {
+        text-align: center;
+        width: 64;
+        height: 1;
+        color: $text-muted;
+    }
+    #main-card {
+        width: 64;
+        height: auto;
+        padding: 1 2;
+        background: $surface;
+        border: tall $accent;
+    }
+    #txn-merchant {
+        text-style: bold;
+        text-align: center;
+        width: 100%;
+    }
+    #txn-amount {
+        text-align: center;
+        width: 100%;
+        text-style: bold;
+    }
+    #txn-date-account {
+        text-align: center;
+        color: $text-muted;
+        width: 100%;
+    }
+    #txn-category-row {
+        text-align: center;
+        width: 100%;
+        height: 1;
+        margin-top: 1;
+    }
+    #txn-note {
+        text-align: center;
+        color: $text;
+        width: 100%;
+        margin-top: 1;
+    }
+    #txn-done {
+        width: 64;
+        height: auto;
+        padding: 2 3;
+        margin: 1 0;
+        background: $surface;
+        border: tall $success;
+        text-align: center;
+    }
+    #txn-hint {
+        text-align: center;
+        width: 64;
+        height: 1;
+        margin-top: 1;
+        color: $text-muted;
+    }
+    """
 
     def __init__(
         self, conn: sqlite3.Connection, month: int, year: int, copilot_token: str = ""
@@ -180,7 +271,21 @@ class OneByOneScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Static(id="txn-detail")
+        with Vertical(id="obo-outer"):
+            yield Static(id="obo-progress-line")
+            yield ProgressBar(id="obo-progress-bar", total=100, show_eta=False, show_percentage=False)
+            yield Static(id="prev-label")
+            yield Static(id="prev-card", classes="preview-card")
+            with Vertical(id="main-card"):
+                yield Static(id="txn-merchant")
+                yield Static(id="txn-amount")
+                yield Static(id="txn-date-account")
+                yield Static(id="txn-category-row")
+                yield Static(id="txn-note")
+            yield Static(id="next-card", classes="preview-card")
+            yield Static(id="next-label")
+            yield Static(id="txn-done")
+            yield Static(id="txn-hint")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -192,33 +297,132 @@ class OneByOneScreen(Screen):
         self._unreviewed = [t for t in all_txns if t["review_status"] == "needs_review"]
         self._current_idx = 0
 
+    def _format_preview(self, txn) -> Text:
+        """Build a compact one-line preview for prev/next cards."""
+        amount = -txn["amount"] / 100
+        desc = txn["description"] or "Unknown"
+        if len(desc) > 28:
+            desc = desc[:27] + "…"
+        line = Text()
+        line.append(f"{txn['date']}  ", style="dim")
+        line.append(desc, style="dim")
+        line.append(f"  ${amount:,.2f}", style="dim bold")
+        return line
+
     def _show_current(self) -> None:
-        detail = self.query_one("#txn-detail", Static)
-        if not self._unreviewed or self._current_idx >= len(self._unreviewed):
-            detail.update("All transactions reviewed! Press 't' for table or 'q' to quit.")
-            return
-        txn = self._unreviewed[self._current_idx]
+        progress_line = self.query_one("#obo-progress-line", Static)
+        progress_bar = self.query_one("#obo-progress-bar", ProgressBar)
+        prev_label = self.query_one("#prev-label", Static)
+        prev_card = self.query_one("#prev-card", Static)
+        main_card = self.query_one("#main-card", Vertical)
+        next_card = self.query_one("#next-card", Static)
+        next_label = self.query_one("#next-label", Static)
+        done_widget = self.query_one("#txn-done", Static)
+        hint = self.query_one("#txn-hint", Static)
+
+        merchant = self.query_one("#txn-merchant", Static)
+        amount_w = self.query_one("#txn-amount", Static)
+        date_acct_w = self.query_one("#txn-date-account", Static)
+        cat_row = self.query_one("#txn-category-row", Static)
+        note_w = self.query_one("#txn-note", Static)
+
         total = len(self._unreviewed)
+
+        if not self._unreviewed or self._current_idx >= total:
+            # All done state
+            progress_line.display = False
+            progress_bar.display = False
+            prev_label.display = False
+            prev_card.display = False
+            main_card.display = False
+            next_card.display = False
+            next_label.display = False
+            done_text = Text()
+            done_text.append("All transactions reviewed!\n\n", style="bold green")
+            done_text.append("[t] Table view  [q] Quit", style="dim")
+            done_widget.update(done_text)
+            done_widget.display = True
+            hint.display = False
+            return
+
+        done_widget.display = False
+
+        # Progress
+        idx = self._current_idx
+        progress_line.update(f"{idx + 1} of {total} remaining")
+        progress_bar.update(total=total, progress=idx)
+        progress_line.display = True
+        progress_bar.display = True
+
+        # Previous preview
+        if idx > 0:
+            prev_txn = self._unreviewed[idx - 1]
+            prev_card.update(self._format_preview(prev_txn))
+            prev_card.set_classes("preview-card")
+            prev_label.update("▲ previous")
+            prev_label.display = True
+            prev_card.display = True
+        else:
+            prev_card.update("")
+            prev_card.set_classes("preview-hidden")
+            prev_label.update("")
+            prev_label.display = False
+            prev_card.display = False
+
+        # Main card — update children in place
+        main_card.display = True
+        txn = self._unreviewed[idx]
         amount = -txn["amount"] / 100
         account_name = self._format_account(txn)
         note = txn["note"] or ""
         styled_cat = self._styled_label(txn["label_id"])
 
-        content = Text()
-        content.append(f"Transaction {self._current_idx + 1}/{total}\n\n")
-        content.append(f"  Date:     {txn['date']}\n")
-        content.append(f"  Merchant: {txn['description']}\n")
-        content.append(f"  Amount:   ${amount:,.2f}\n")
-        content.append("  Category: ")
-        content.append_text(styled_cat)
-        content.append(f"\n  Account:  {account_name}\n")
-        content.append(f"  Source:   {txn['categorized_by'] or 'none'}\n")
+        merchant.update(Text(txn["description"] or "Unknown", style="bold"))
+
+        amount_text = Text(f"${amount:,.2f}", style="bold")
+        if amount < 0:
+            amount_text = Text(f"${amount:,.2f}", style="bold green")
+        amount_w.update(amount_text)
+
+        date_acct = Text()
+        date_acct.append(f"{txn['date']}", style="dim")
+        date_acct.append(f"  •  {account_name}", style="dim")
+        date_acct_w.update(date_acct)
+
+        cat_source = Text()
+        cat_source.append_text(styled_cat)
+        source = txn["categorized_by"] or "none"
+        cat_source.append(f"  via {source}", style="dim italic")
+        cat_row.update(cat_source)
+
         if note:
-            content.append(f"  Note:     {note}\n")
-        content.append(
-            "\n  [a] Accept  [c] Change  [e] Exempt  [n] Note  [s] Skip  [t] Table  [q] Quit"
-        )
-        detail.update(content)
+            note_text = Text()
+            note_text.append("📝 ", style="dim")
+            note_text.append(note)
+            note_w.update(note_text)
+            note_w.display = True
+        else:
+            note_w.update("")
+            note_w.display = False
+
+        # Next preview
+        if idx < total - 1:
+            next_txn = self._unreviewed[idx + 1]
+            next_card.update(self._format_preview(next_txn))
+            next_card.set_classes("preview-card")
+            next_label.update("▼ next")
+            next_label.display = True
+            next_card.display = True
+        else:
+            next_card.update("")
+            next_card.set_classes("preview-hidden")
+            next_label.update("")
+            next_label.display = False
+            next_card.display = False
+
+        # Hint
+        hint.update("[a] Accept  [c] Change  [e] Exempt  [n] Note  [s] Skip  [↑↓] Navigate")
+        hint.display = True
 
     def _format_account(self, txn) -> str:
         name = txn["institution_name"] or ""
@@ -254,6 +458,16 @@ class OneByOneScreen(Screen):
     def _advance(self) -> None:
         self._current_idx += 1
         self._show_current()
+
+    def action_prev_txn(self) -> None:
+        if self._current_idx > 0:
+            self._current_idx -= 1
+            self._show_current()
+
+    def action_next_txn(self) -> None:
+        if self._current_idx < len(self._unreviewed) - 1:
+            self._current_idx += 1
+            self._show_current()
 
     def _push_to_copilot(self, fn, *args) -> None:
         """Fire a Copilot Money mutation in a background worker."""
@@ -310,8 +524,6 @@ class OneByOneScreen(Screen):
             return
         txn = self._unreviewed[self._current_idx]
         update_transaction_label(self.conn, txn["id"], label_id, "manual", "reviewed")
-        if txn["normalized_description"]:
-            add_rule(self.conn, txn["normalized_description"], label_id, source="auto_learned")
         self._sync_category_and_review(txn, label_id)
         self._advance()
 
@@ -363,6 +575,7 @@ class ReviewApp(App):
     """Interactive transaction review TUI with table and one-by-one modes."""
 
     TITLE = "Finmint — Review"
+    MOUSE_SUPPORT = False
 
     BINDINGS = [
         Binding("a", "accept", "Accept"),
@@ -373,6 +586,12 @@ class ReviewApp(App):
         Binding("space", "toggle_select", "Select"),
         Binding("b", "bulk_accept", "Bulk Accept"),
         Binding("t", "toggle_mode", "One-by-One"),
+        Binding("j", "cursor_down", "Down", show=False),
+        Binding("k", "cursor_up", "Up", show=False),
+        Binding("ctrl+d", "half_page_down", "½ Page Down", show=False),
+        Binding("ctrl+u", "half_page_up", "½ Page Up", show=False),
+        Binding("g", "cursor_top", "Top", show=False),
+        Binding("shift+g", "cursor_bottom", "Bottom", show=False),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -613,12 +832,6 @@ class ReviewApp(App):
             self._sort_ascending = True
         self._refresh_table()
 
-    def on_data_table_header_selected(self, event: DataTable.HeaderSelected) -> None:
-        """Sort by clicked column header."""
-        idx = event.column_index
-        if idx < len(_SORT_COLUMNS):
-            self._apply_sort(_SORT_COLUMNS[idx])
-
     def _push_to_copilot(self, fn, *args) -> None:
         """Fire a Copilot Money mutation in a background worker."""
         if not self._copilot_token:
@@ -692,8 +905,6 @@ class ReviewApp(App):
         if label_id is None:
             return
         update_transaction_label(self.conn, self._editing_txn_id, label_id, "manual", "reviewed")
-        if self._editing_txn_desc:
-            add_rule(self.conn, self._editing_txn_desc, label_id, source="auto_learned")
         self._sync_category_and_review(self._editing_txn, label_id)
         self._update_row(self._editing_txn_id)
         self._update_summary()
@@ -770,6 +981,41 @@ class ReviewApp(App):
                 self._update_row(txn["id"])
         self._selected_keys.clear()
         self._update_summary()
+
+    def _move_cursor(self, delta: int) -> None:
+        """Move the table cursor by delta rows, clamped to bounds."""
+        table = self.query_one("#review-table", DataTable)
+        if table.row_count == 0:
+            return
+        row, col = table.cursor_coordinate
+        new_row = max(0, min(row + delta, table.row_count - 1))
+        table.move_cursor(row=new_row)
+
+    def action_cursor_down(self) -> None:
+        self._move_cursor(1)
+
+    def action_cursor_up(self) -> None:
+        self._move_cursor(-1)
+
+    def action_half_page_down(self) -> None:
+        table = self.query_one("#review-table", DataTable)
+        half = max(1, table.size.height // 2)
+        self._move_cursor(half)
+
+    def action_half_page_up(self) -> None:
+        table = self.query_one("#review-table", DataTable)
+        half = max(1, table.size.height // 2)
+        self._move_cursor(-half)
+
+    def action_cursor_top(self) -> None:
+        table = self.query_one("#review-table", DataTable)
+        if table.row_count > 0:
+            table.move_cursor(row=0)
+
+    def action_cursor_bottom(self) -> None:
+        table = self.query_one("#review-table", DataTable)
+        if table.row_count > 0:
+            table.move_cursor(row=table.row_count - 1)
 
     def action_toggle_mode(self) -> None:
         self.push_screen(

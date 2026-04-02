@@ -11,6 +11,7 @@ class AccountsApp(App):
     """Interactive TUI for viewing connected bank accounts."""
 
     TITLE = "Finmint — Accounts"
+    MOUSE_SUPPORT = False
 
     BINDINGS = [
         Binding("q", "quit", "Quit"),

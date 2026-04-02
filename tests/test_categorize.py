@@ -11,7 +11,6 @@ from finmint.db import (
     insert_transaction,
     get_transactions,
 )
-from finmint.rules import add_rule
 from finmint.db import get_label_by_name
 from tests.conftest import seed_test_categories
 
@@ -39,8 +38,9 @@ def _setup_db() -> sqlite3.Connection:
     return conn
 
 
-def _insert_txn(conn, txn_id, description, amount, date, account_id="acct1"):
-    """Insert an uncategorized transaction."""
+def _insert_txn(conn, txn_id, description, amount, date, account_id="acct1",
+                label_id=None):
+    """Insert a transaction."""
     insert_transaction(conn, {
         "id": txn_id,
         "account_id": account_id,
@@ -48,7 +48,7 @@ def _insert_txn(conn, txn_id, description, amount, date, account_id="acct1"):
         "date": date,
         "description": description,
         "normalized_description": description.upper() if description else None,
-        "label_id": None,
+        "label_id": label_id,
         "review_status": "needs_review",
         "categorized_by": None,
         "transfer_pair_id": None,
@@ -135,18 +135,6 @@ class TestPipelineOrder:
 
         result = categorize_month(conn, config, 3, 2026)
 
-        # AI should not receive the transfer transactions
-        # They have categorized_by=None but label_id is set, however our filter
-        # checks categorized_by is None AND review_status is 'needs_review'
-        # Transfer detection sets label_id but not categorized_by, so they'd
-        # still pass the filter. But since label_id is set, ai.categorize_transactions
-        # filters them out internally. Let's verify the mock was not called
-        # with transactions that have a label.
-        # Actually the orchestrator filters on categorized_by=None AND
-        # review_status='needs_review'. Transfers have review_status='needs_review'
-        # and categorized_by=None, so they will be in the list but ai module
-        # filters on label_id IS NULL.
-        # The mock returns 0, so ai_categorized=0.
         assert result["transfers_detected"] == 1
 
     @patch("finmint.categorize.categorize_transactions", return_value=0)
@@ -229,12 +217,14 @@ class TestIntegration:
     """Integration tests using real in-memory DB (no mocks on rules/transfers)."""
 
     def test_rules_categorize_matching_transactions(self):
-        """Rules engine categorizes matching transactions in the pipeline."""
+        """Copilot-derived rules categorize matching transactions in the pipeline."""
         conn = _setup_db()
         config = {"anthropic_api_key": "fake"}
 
         groceries = get_label_by_name(conn, "Groceries")
-        add_rule(conn, "WHOLE FOODS", groceries["id"])
+        # Seed a categorized transaction to act as a rule
+        _insert_txn(conn, "txn-seed", "WHOLE FOODS MARKET", -3000, "2026-02-10",
+                    label_id=groceries["id"])
 
         _insert_txn(conn, "txn-1", "WHOLE FOODS MARKET #123", -5000, "2026-03-10")
         _insert_txn(conn, "txn-2", "RANDOM STORE", -2000, "2026-03-12")
@@ -309,11 +299,12 @@ class TestIntegration:
         conn = _setup_db()
         config = {"anthropic_api_key": "fake"}
 
-        # Set up a rule
+        # Seed a categorized transaction to act as a rule for CHIPOTLE
         dining = get_label_by_name(conn, "Dining Out")
-        add_rule(conn, "CHIPOTLE", dining["id"])
+        _insert_txn(conn, "txn-seed", "CHIPOTLE", -1000, "2026-02-05",
+                    label_id=dining["id"])
 
-        # Transaction 1: matches rule
+        # Transaction 1: matches derived rule
         _insert_txn(conn, "txn-rule", "CHIPOTLE MEXICAN GRILL", -1200, "2026-03-05")
 
         # Transactions 2-3: transfer pair
@@ -367,7 +358,9 @@ class TestIntegration:
         config = {"anthropic_api_key": "fake"}
 
         groceries = get_label_by_name(conn, "Groceries")
-        add_rule(conn, "TRADER JOE", groceries["id"])
+        # Seed a categorized transaction to act as a rule
+        _insert_txn(conn, "txn-seed", "TRADER JOE", -2000, "2026-02-05",
+                    label_id=groceries["id"])
 
         _insert_txn(conn, "txn-1", "TRADER JOE'S", -4000, "2026-03-08")
 

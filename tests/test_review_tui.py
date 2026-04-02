@@ -4,7 +4,7 @@ from finmint.db import (
     init_db, insert_transaction,
     get_transactions, get_label_by_name, update_transaction_label,
 )
-from finmint.rules import add_rule, get_all_rules
+from finmint.rules import get_all_rules, match_rules
 from tests.conftest import seed_test_categories
 
 
@@ -37,17 +37,18 @@ class TestReviewDataOps:
         txn = conn.execute("SELECT * FROM transactions WHERE id = ?", ("txn-1",)).fetchone()
         assert txn["review_status"] == "reviewed"
 
-    def test_change_category_creates_merchant_rule(self):
+    def test_category_change_creates_derived_rule(self):
+        """Categorizing a transaction makes it act as a rule for future matches."""
         conn = _setup_db()
         groceries = get_label_by_name(conn, "Groceries")
         _insert_txn(conn, "txn-1", "Trader Joe's")
-        # Simulate category correction + auto-rule
+        # Simulate category correction
         update_transaction_label(conn, "txn-1", groceries["id"], "manual", "reviewed")
-        add_rule(conn, "TRADER JOE'S", groceries["id"], source="auto_learned")
+
+        # The categorized transaction now acts as a derived rule
         rules = get_all_rules(conn)
         assert len(rules) == 1
         assert rules[0]["pattern"] == "TRADER JOE'S"
-        assert rules[0]["source"] == "auto_learned"
 
     def test_exempt_transaction(self):
         conn = _setup_db()
@@ -77,17 +78,15 @@ class TestReviewDataOps:
         needs_review = [t for t in txns if t["review_status"] == "needs_review"]
         assert len(needs_review) == 0
 
-    def test_auto_rule_from_correction_applies_to_future(self):
-        """Category correction creates rule that would match future transactions."""
+    def test_categorized_transaction_matches_future(self):
+        """A categorized transaction acts as a rule for future similar transactions."""
         conn = _setup_db()
         dining = get_label_by_name(conn, "Dining Out")
         # First transaction: user corrects category
         _insert_txn(conn, "txn-1", "CHIPOTLE MEXICAN GRILL")
         update_transaction_label(conn, "txn-1", dining["id"], "manual", "reviewed")
-        add_rule(conn, "CHIPOTLE MEXICAN GRILL", dining["id"], source="auto_learned")
 
-        # Second transaction: same merchant, should match the rule
-        from finmint.rules import match_rules
+        # Should match future transactions with similar description
         result = match_rules(conn, "CHIPOTLE MEXICAN GRILL #456")
         assert result is not None
         assert result["label_id"] == dining["id"]

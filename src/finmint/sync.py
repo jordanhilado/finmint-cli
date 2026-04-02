@@ -4,7 +4,7 @@ import calendar
 import re
 import sqlite3
 from datetime import datetime, timezone
-from typing import TypedDict
+from typing import Callable, TypedDict
 
 from finmint import copilot
 from finmint.config import get_token
@@ -84,6 +84,7 @@ def sync_month(
     month: int,
     year: int,
     force: bool = False,
+    on_progress: "Callable[[str, int, int], None] | None" = None,
 ) -> SyncResult:
     """Sync transactions from Copilot Money for a given month into the local DB.
 
@@ -110,16 +111,23 @@ def sync_month(
 
     token = get_token()
 
+    def _progress(step: str, current: int, total: int) -> None:
+        if on_progress:
+            on_progress(step, current, total)
+
     try:
         with copilot.create_client(token) as client:
             # Sync categories first so we can map category IDs on transactions
+            _progress("Fetching categories", 0, 1)
             categories = copilot.fetch_categories(client)
             for cat in categories:
                 upsert_category(
                     conn, cat["id"], cat["name"], cat.get("color"), cat.get("icon")
                 )
+            _progress("Fetching categories", 1, 1)
 
             # Fetch and upsert accounts
+            _progress("Fetching accounts", 0, 1)
             accounts = copilot.fetch_accounts(client)
             for account in accounts:
                 upsert_account(conn, {
@@ -128,6 +136,7 @@ def sync_month(
                     "account_type": account["type"],
                     "last_four": account["mask"],
                 })
+            _progress("Fetching accounts", 1, 1)
 
             # Build date range
             start_date = f"{year:04d}-{month:02d}-01"
@@ -135,10 +144,13 @@ def sync_month(
             end_date = f"{year:04d}-{month:02d}-{last_day:02d}"
 
             # Fetch transactions for the date range
+            _progress("Fetching transactions", 0, 1)
             txns = copilot.fetch_transactions(client, start_date, end_date)
             result["total_fetched"] = len(txns)
+            _progress("Fetching transactions", 1, 1)
 
-            for txn in txns:
+            total_txns = len(txns)
+            for i, txn in enumerate(txns):
                 raw_desc = txn.get("description", "")
                 normalized = normalize_merchant(raw_desc)
 
@@ -176,6 +188,8 @@ def sync_month(
 
                 if not already_exists:
                     result["new_count"] += 1
+
+                _progress("Processing transactions", i + 1, total_txns)
 
     except copilot.CopilotAuthError:
         result["error"] = (

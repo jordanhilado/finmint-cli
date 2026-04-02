@@ -49,14 +49,6 @@ CREATE TABLE IF NOT EXISTS transactions (
     created_at TEXT
 );
 
-CREATE TABLE IF NOT EXISTS merchant_rules (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    pattern TEXT NOT NULL,
-    label_id INTEGER REFERENCES labels(id) NOT NULL,
-    source TEXT DEFAULT 'manual',
-    created_at TEXT
-);
-
 CREATE TABLE IF NOT EXISTS ai_summaries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     period_type TEXT NOT NULL,
@@ -76,8 +68,6 @@ CREATE INDEX IF NOT EXISTS idx_transactions_review_status
     ON transactions(review_status);
 CREATE INDEX IF NOT EXISTS idx_transactions_transfer_pair
     ON transactions(transfer_pair_id);
-CREATE INDEX IF NOT EXISTS idx_merchant_rules_pattern
-    ON merchant_rules(pattern);
 """
 
 # ---------------------------------------------------------------------------
@@ -146,8 +136,10 @@ def _now_iso() -> str:
 
 
 def get_labels(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    """Return all labels ordered by id."""
-    cur = conn.execute("SELECT * FROM labels ORDER BY id")
+    """Return Copilot Money categories ordered by name."""
+    cur = conn.execute(
+        "SELECT * FROM labels WHERE copilot_id IS NOT NULL ORDER BY name"
+    )
     return cur.fetchall()
 
 
@@ -164,8 +156,24 @@ def upsert_category(
     color: str | None = None,
     icon: str | None = None,
 ) -> None:
-    """Insert or update a category from Copilot Money, keyed on copilot_id."""
+    """Insert or update a category from Copilot Money, keyed on copilot_id.
+
+    Handles the case where a label with the same name already exists under a
+    different (or NULL) copilot_id by updating the existing row in-place.
+    """
     now = _now_iso()
+    # If a row with this name exists but has a different copilot_id, update it
+    existing = conn.execute(
+        "SELECT id, copilot_id FROM labels WHERE name = ?", (name,)
+    ).fetchone()
+    if existing and existing["copilot_id"] != copilot_id:
+        conn.execute(
+            "UPDATE labels SET copilot_id = ?, color = ?, icon = ? WHERE id = ?",
+            (copilot_id, color, icon, existing["id"]),
+        )
+        conn.commit()
+        return
+
     conn.execute(
         "INSERT INTO labels (copilot_id, name, color, icon, created_at) "
         "VALUES (?, ?, ?, ?, ?) "
@@ -281,6 +289,30 @@ def update_transaction_label(
         (label_id, categorized_by, status, txn_id),
     )
     conn.commit()
+
+
+def delete_transactions_for_month(
+    conn: sqlite3.Connection, month: int, year: int
+) -> int:
+    """Delete all transactions for a given month/year. Returns count deleted."""
+    start = f"{year:04d}-{month:02d}-01"
+    if month == 12:
+        end = f"{year + 1:04d}-01-01"
+    else:
+        end = f"{year:04d}-{month + 1:02d}-01"
+
+    cur = conn.execute(
+        "DELETE FROM transactions WHERE date >= ? AND date < ?",
+        (start, end),
+    )
+    # Also clear any AI summary for this month
+    period_key = f"{year:04d}-{month:02d}"
+    conn.execute(
+        "DELETE FROM ai_summaries WHERE period_type = 'month' AND period_key = ?",
+        (period_key,),
+    )
+    conn.commit()
+    return cur.rowcount
 
 
 def update_transaction_note(

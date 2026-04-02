@@ -146,8 +146,8 @@ class TestSyncCategories:
         assert count == 2
         labels = get_labels(self.conn)
         assert len(labels) == 2
-        assert labels[0]["name"] == "Groceries"
-        assert labels[0]["copilot_id"] == "cat-groc"
+        names = {l["name"] for l in labels}
+        assert names == {"Groceries", "Dining"}
 
 
 class TestSyncMonth:

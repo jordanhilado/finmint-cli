@@ -1,102 +1,103 @@
-"""Merchant rules engine for finmint: CRUD, substring matching, longest-match-wins."""
+"""Merchant rules engine for finmint: derive rules from Copilot Money categorizations.
+
+Instead of maintaining a local rules table, rules are derived from transactions
+that Copilot Money has already categorized. For each unique normalized merchant
+description with a category, the most common category becomes the rule.
+"""
 
 import sqlite3
-from datetime import datetime, timezone
 from typing import Optional
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def add_rule(
+def _build_merchant_rules(
     conn: sqlite3.Connection,
-    pattern: str,
-    label_id: int,
-    source: str = "manual",
-) -> int:
-    """Add a merchant rule. Pattern is normalized to uppercase.
+) -> list[dict]:
+    """Build merchant→category rules from already-categorized transactions.
 
-    If a rule with the same normalized pattern already exists, update its
-    label_id instead of inserting a duplicate. Returns the rule id.
+    Groups transactions by normalized_description, picks the most frequently
+    assigned label_id for each merchant. Only considers transactions that have
+    both a normalized_description and a label_id.
+
+    Returns a list of dicts with keys: pattern, label_id.
     """
-    normalized = pattern.strip().upper()
-    existing = conn.execute(
-        "SELECT id FROM merchant_rules WHERE pattern = ?", (normalized,)
-    ).fetchone()
+    rows = conn.execute(
+        "SELECT normalized_description, label_id, COUNT(*) as cnt "
+        "FROM transactions "
+        "WHERE normalized_description IS NOT NULL "
+        "AND normalized_description != '' "
+        "AND label_id IS NOT NULL "
+        "GROUP BY normalized_description, label_id "
+        "ORDER BY normalized_description, cnt DESC"
+    ).fetchall()
 
-    if existing:
-        conn.execute(
-            "UPDATE merchant_rules SET label_id = ?, source = ? WHERE id = ?",
-            (label_id, source, existing["id"]),
-        )
-        conn.commit()
-        return existing["id"]
+    # For each merchant, keep only the most frequent label
+    rules: dict[str, dict] = {}
+    for row in rows:
+        nd = row["normalized_description"]
+        if nd not in rules:
+            rules[nd] = {"pattern": nd, "label_id": row["label_id"]}
 
-    cur = conn.execute(
-        "INSERT INTO merchant_rules (pattern, label_id, source, created_at) "
-        "VALUES (?, ?, ?, ?)",
-        (normalized, label_id, source, _now_iso()),
-    )
-    conn.commit()
-    return cur.lastrowid  # type: ignore[return-value]
-
-
-def delete_rule(conn: sqlite3.Connection, rule_id: int) -> None:
-    """Delete a merchant rule. Transactions that used it keep their labels."""
-    conn.execute("DELETE FROM merchant_rules WHERE id = ?", (rule_id,))
-    conn.commit()
-
-
-def update_rule(
-    conn: sqlite3.Connection, rule_id: int, label_id: int
-) -> None:
-    """Update a rule's label_id."""
-    conn.execute(
-        "UPDATE merchant_rules SET label_id = ? WHERE id = ?",
-        (label_id, rule_id),
-    )
-    conn.commit()
+    return list(rules.values())
 
 
 def match_rules(
     conn: sqlite3.Connection, normalized_description: str
-) -> Optional[sqlite3.Row]:
-    """Match a normalized description against all rules via substring containment.
+) -> Optional[dict]:
+    """Match a normalized description against Copilot-derived rules via substring.
 
     Returns the longest matching rule (most specific wins), or None.
     """
     desc_upper = normalized_description.upper()
-    rows = conn.execute(
-        "SELECT * FROM merchant_rules ORDER BY id"
-    ).fetchall()
+    rules = _build_merchant_rules(conn)
 
-    best: Optional[sqlite3.Row] = None
+    best: Optional[dict] = None
     best_len = 0
-    for row in rows:
-        if row["pattern"] in desc_upper:
-            plen = len(row["pattern"])
+    for rule in rules:
+        if rule["pattern"] in desc_upper:
+            plen = len(rule["pattern"])
             if plen > best_len:
-                best = row
+                best = rule
                 best_len = plen
     return best
 
 
-def get_all_rules(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    """Return all rules with label names, sorted alphabetically by pattern."""
-    return conn.execute(
-        "SELECT mr.id, mr.pattern, mr.label_id, mr.source, mr.created_at, "
-        "l.name AS label_name "
-        "FROM merchant_rules mr "
-        "JOIN labels l ON mr.label_id = l.id "
-        "ORDER BY mr.pattern ASC"
+def get_all_rules(conn: sqlite3.Connection) -> list[dict]:
+    """Return all derived rules with label names, sorted by pattern.
+
+    Rules are derived from how transactions are already categorized in
+    Copilot Money, grouped by normalized merchant description.
+    """
+    rows = conn.execute(
+        "SELECT t.normalized_description AS pattern, "
+        "t.label_id, l.name AS label_name, COUNT(*) as txn_count "
+        "FROM transactions t "
+        "JOIN labels l ON t.label_id = l.id "
+        "WHERE t.normalized_description IS NOT NULL "
+        "AND t.normalized_description != '' "
+        "AND t.label_id IS NOT NULL "
+        "GROUP BY t.normalized_description, t.label_id "
+        "ORDER BY t.normalized_description ASC"
     ).fetchall()
+
+    # Deduplicate: keep the most frequent label per merchant
+    seen: dict[str, dict] = {}
+    for row in rows:
+        nd = row["pattern"]
+        if nd not in seen:
+            seen[nd] = {
+                "pattern": nd,
+                "label_id": row["label_id"],
+                "label_name": row["label_name"],
+                "txn_count": row["txn_count"],
+            }
+
+    return sorted(seen.values(), key=lambda r: r["pattern"])
 
 
 def apply_rules_to_transactions(
     conn: sqlite3.Connection, month: int, year: int
 ) -> int:
-    """Apply merchant rules to all uncategorized transactions for a month.
+    """Apply Copilot-derived merchant rules to uncategorized transactions.
 
     For each uncategorized transaction, run match_rules on its
     normalized_description. If a match is found, set label_id,

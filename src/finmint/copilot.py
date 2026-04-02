@@ -68,6 +68,15 @@ mutation BulkEditTransactions($input: BulkEditTransactionInput!, $filter: Transa
 }
 """
 
+UPDATE_CATEGORY_MUTATION = """
+mutation UpdateCategory($id: ID!, $input: UpdateCategoryInput!) {
+  updateCategory(id: $id, input: $input) {
+    id name colorName
+    __typename
+  }
+}
+"""
+
 
 class CopilotAuthError(Exception):
     """Raised when the Copilot API returns an UNAUTHENTICATED GraphQL error."""
@@ -281,6 +290,42 @@ def fetch_categories(client: httpx.Client) -> list[dict]:
     return results
 
 
+# Copilot Money color name → hex mapping (dark mode values for terminal use).
+# Keys are uppercase API names (e.g. "RED1"); values are hex codes.
+COPILOT_COLOR_MAP: dict[str, str] = {
+    "RED1": "#e96767",
+    "RED2": "#f25a8c",
+    "ORANGE1": "#db7c2f",
+    "ORANGE2": "#e26b3c",
+    "BROWN1": "#c08635",
+    "YELLOW1": "#cba50b",
+    "YELLOW2": "#c08f1b",
+    "OLIVE1": "#7da72a",
+    "GREEN1": "#42ae42",
+    "TEAL1": "#0eaaaa",
+    "BLUE1": "#429efa",
+    "PURPLE1": "#b271f4",
+    "PURPLE2": "#9288fc",
+    "PINK1": "#f04cd5",
+    "PINK2": "#cb5ae2",
+    "GRAY1": "#9e9e9e",
+}
+
+# Reverse lookup: hex → Copilot color name
+COPILOT_HEX_TO_NAME: dict[str, str] = {v: k for k, v in COPILOT_COLOR_MAP.items()}
+
+
+def copilot_color_to_hex(color_name: str | None) -> str | None:
+    """Convert a Copilot Money color name to hex, or return as-is if already hex."""
+    if color_name is None:
+        return None
+    # Already a hex code
+    h = color_name.lstrip("#")
+    if len(h) == 6 and all(c in "0123456789abcdefABCDEF" for c in h):
+        return color_name
+    return COPILOT_COLOR_MAP.get(color_name.upper())
+
+
 def _parse_category(cat: dict) -> dict:
     """Extract id, name, color, icon from a Copilot Money category node."""
     icon_data = cat.get("icon")
@@ -291,7 +336,7 @@ def _parse_category(cat: dict) -> dict:
     return {
         "id": cat["id"],
         "name": cat["name"],
-        "color": cat.get("colorName"),
+        "color": copilot_color_to_hex(cat.get("colorName")),
         "icon": icon,
     }
 
@@ -378,3 +423,27 @@ def set_transaction_reviewed(
         raise CopilotAPIError(
             f"Failed to update review status: {failed[0].get('error', 'unknown')}"
         )
+
+
+def set_category_color(
+    client: httpx.Client,
+    category_id: str,
+    color_name: str,
+) -> None:
+    """Update a category's color in Copilot Money.
+
+    *color_name* must be a Copilot API color name (e.g. ``RED1``, ``BLUE1``).
+    """
+    response = client.post(
+        BASE_URL,
+        json={
+            "operationName": "UpdateCategory",
+            "query": UPDATE_CATEGORY_MUTATION,
+            "variables": {
+                "id": category_id,
+                "input": {"colorName": color_name},
+            },
+        },
+    )
+    response.raise_for_status()
+    _raise_for_graphql_errors(response.json())

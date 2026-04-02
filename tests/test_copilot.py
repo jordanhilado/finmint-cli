@@ -416,7 +416,7 @@ def _graphql_categories_response(categories: list[dict]) -> dict:
 def _make_raw_category(
     cat_id: str = "cat_1",
     name: str = "Groceries",
-    color_name: str = "green",
+    color_name: str = "GREEN1",
     icon_unicode: str | None = "🛒",
     children: list | None = None,
 ) -> dict:
@@ -441,8 +441,8 @@ class TestFetchCategories:
     def test_happy_path_returns_parsed_categories(self, mock_client):
         """fetch_categories returns a flat list of categories."""
         categories = [
-            _make_raw_category("cat_1", "Groceries", "green", "🛒"),
-            _make_raw_category("cat_2", "Transport", "blue", "🚗"),
+            _make_raw_category("cat_1", "Groceries", "GREEN1", "🛒"),
+            _make_raw_category("cat_2", "Transport", "BLUE1", "🚗"),
         ]
         respx.post(BASE_URL).mock(
             return_value=httpx.Response(
@@ -455,14 +455,14 @@ class TestFetchCategories:
         assert len(result) == 2
         assert result[0]["id"] == "cat_1"
         assert result[0]["name"] == "Groceries"
-        assert result[0]["color"] == "green"
+        assert result[0]["color"] == "#42ae42"
         assert result[0]["icon"] == "🛒"
 
     @respx.mock
     def test_flattens_child_categories(self, mock_client):
         """fetch_categories flattens parent and child categories."""
-        child = _make_raw_category("cat_child", "Fast Food", "red", "🍔")
-        parent = _make_raw_category("cat_parent", "Dining", "red", "🍽️", children=[child])
+        child = _make_raw_category("cat_child", "Fast Food", "RED1", "🍔")
+        parent = _make_raw_category("cat_parent", "Dining", "RED1", "🍽️", children=[child])
         respx.post(BASE_URL).mock(
             return_value=httpx.Response(
                 200, json=_graphql_categories_response([parent])

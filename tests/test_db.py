@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 from finmint.db import (
+    delete_transactions_for_month,
     get_copilot_id_for_label,
     get_label_by_copilot_id,
     get_label_by_name,
@@ -36,7 +37,6 @@ class TestInitDb:
             "accounts",
             "ai_summaries",
             "labels",
-            "merchant_rules",
             "transactions",
         ]
 
@@ -47,7 +47,6 @@ class TestInitDb:
         )
         indexes = sorted(row["name"] for row in cur.fetchall())
         assert indexes == [
-            "idx_merchant_rules_pattern",
             "idx_transactions_account_date",
             "idx_transactions_date",
             "idx_transactions_review_status",
@@ -112,6 +111,15 @@ class TestUpsertCategory:
         upsert_category(self.conn, "cat-2", "Dining", "#e74c3c", "🍽️")
         labels = get_labels(self.conn)
         assert len(labels) == 2
+
+    def test_same_name_different_copilot_id_updates_existing(self):
+        """A label with the same name but different copilot_id should update, not crash."""
+        upsert_category(self.conn, "old-id", "Groceries", "#aaa", "🛒")
+        upsert_category(self.conn, "new-id", "Groceries", "#bbb", "🥑")
+        labels = get_labels(self.conn)
+        assert len(labels) == 1
+        assert labels[0]["copilot_id"] == "new-id"
+        assert labels[0]["color"] == "#bbb"
 
     def test_nullable_color_and_icon(self):
         upsert_category(self.conn, "cat-1", "Unknown")
@@ -280,3 +288,51 @@ class TestTransactions:
         assert txn["label_id"] == shopping["id"]
         assert txn["categorized_by"] == "ai"
         assert txn["review_status"] == "auto_accepted"
+
+
+class TestDeleteTransactionsForMonth:
+    """delete_transactions_for_month removes all transactions for a month."""
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, in_memory_db: sqlite3.Connection):
+        init_db_with_conn(in_memory_db)
+        self.conn = in_memory_db
+
+    def test_deletes_month_transactions(self):
+        insert_transaction(self.conn, {"id": "t1", "amount": -100, "date": "2026-03-10"})
+        insert_transaction(self.conn, {"id": "t2", "amount": -200, "date": "2026-03-20"})
+        deleted = delete_transactions_for_month(self.conn, 3, 2026)
+        assert deleted == 2
+        assert get_transactions(self.conn, 3, 2026) == []
+
+    def test_does_not_affect_other_months(self):
+        insert_transaction(self.conn, {"id": "t-mar", "amount": -100, "date": "2026-03-15"})
+        insert_transaction(self.conn, {"id": "t-apr", "amount": -200, "date": "2026-04-05"})
+        insert_transaction(self.conn, {"id": "t-feb", "amount": -300, "date": "2026-02-28"})
+        delete_transactions_for_month(self.conn, 3, 2026)
+        assert len(get_transactions(self.conn, 4, 2026)) == 1
+        assert len(get_transactions(self.conn, 2, 2026)) == 1
+
+    def test_returns_zero_for_empty_month(self):
+        assert delete_transactions_for_month(self.conn, 7, 2026) == 0
+
+    def test_december_boundary(self):
+        insert_transaction(self.conn, {"id": "t-dec", "amount": -100, "date": "2026-12-15"})
+        insert_transaction(self.conn, {"id": "t-jan", "amount": -200, "date": "2027-01-01"})
+        delete_transactions_for_month(self.conn, 12, 2026)
+        assert get_transactions(self.conn, 12, 2026) == []
+        assert len(get_transactions(self.conn, 1, 2027)) == 1
+
+    def test_clears_ai_summary_for_month(self):
+        self.conn.execute(
+            "INSERT INTO ai_summaries (period_type, period_key, summary_text, "
+            "txn_count, txn_total_cents) VALUES (?, ?, ?, ?, ?)",
+            ("month", "2026-03", "test summary", 5, 10000),
+        )
+        self.conn.commit()
+        insert_transaction(self.conn, {"id": "t1", "amount": -100, "date": "2026-03-10"})
+        delete_transactions_for_month(self.conn, 3, 2026)
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM ai_summaries WHERE period_key = '2026-03'"
+        ).fetchone()
+        assert row[0] == 0

@@ -10,16 +10,13 @@ import yaml
 
 FINMINT_DIR_NAME = ".finmint"
 CONFIG_FILE_NAME = "config.yaml"
+TOKEN_FILE_NAME = "token"
 
 REQUIRED_KEYS = {
-    "copilot": ["token"],
     "claude": ["api_key_env"],
 }
 
 DEFAULT_CONFIG = {
-    "copilot": {
-        "token": "",
-    },
     "claude": {
         "api_key_env": "ANTHROPIC_API_KEY",
     },
@@ -35,6 +32,11 @@ def _finmint_dir(home: Path | None = None) -> Path:
 def _config_path(home: Path | None = None) -> Path:
     """Return the path to ~/.finmint/config.yaml."""
     return _finmint_dir(home) / CONFIG_FILE_NAME
+
+
+def _token_path(home: Path | None = None) -> Path:
+    """Return the path to ~/.finmint/token."""
+    return _finmint_dir(home) / TOKEN_FILE_NAME
 
 
 def check_permissions(home: Path | None = None) -> None:
@@ -92,15 +94,6 @@ def validate_config(config: dict) -> list[str]:
             if key not in config[section]:
                 errors.append(f"Missing required key: '{section}.{key}'")
 
-    # Warn if copilot token is empty or a placeholder
-    copilot_section = config.get("copilot", {})
-    if isinstance(copilot_section, dict):
-        token = copilot_section.get("token", "")
-        if not token or not token.strip():
-            errors.append(
-                "copilot.token is empty. Run 'finmint token' to set your Copilot Money JWT."
-            )
-
     # Warn if someone put a raw API key instead of an env var name
     claude_section = config.get("claude", {})
     if isinstance(claude_section, dict):
@@ -123,17 +116,34 @@ def validate_config(config: dict) -> list[str]:
 
 
 def resolve_api_key(config: dict) -> str:
-    """Read the Claude API key from the environment variable named in config.
+    """Read the Claude API key from ~/.finmint/.env or the shell environment.
 
-    Raises RuntimeError if the environment variable is not set or empty.
+    Looks up the env var named in config['claude']['api_key_env']:
+      1. Loads ~/.finmint/.env if it exists (does not override shell env).
+      2. Falls back to the shell environment.
+
+    Raises RuntimeError if the key is not found in either location.
     """
     env_var_name = config["claude"]["api_key_env"]
+    env_file = _finmint_dir() / ".env"
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip("\"'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+
     api_key = os.environ.get(env_var_name)
     if not api_key:
         raise RuntimeError(
-            f"Environment variable '{env_var_name}' is not set or empty.\n"
-            f"Set it before running finmint:\n"
-            f"  export {env_var_name}=sk-ant-..."
+            f"API key '{env_var_name}' is not set.\n"
+            f"Add it to {env_file}:\n"
+            f"  echo '{env_var_name}=sk-ant-...' >> {env_file}"
         )
     return api_key
 
@@ -152,36 +162,36 @@ def init_config(home: Path | None = None) -> Path:
 
 
 def save_token(token: str, home: Path | None = None) -> Path:
-    """Save a Copilot Money JWT to config.yaml (read-modify-write).
-    Creates config file with defaults if it doesn't exist.
-    Returns the path to the config file.
+    """Save a Copilot Money JWT to ~/.finmint/token.
+    Creates the directory if it doesn't exist.
+    Returns the path to the token file.
     """
-    config_file = _config_path(home)
-    if config_file.exists():
-        config = yaml.safe_load(config_file.read_text()) or {}
-    else:
-        finmint_dir = _finmint_dir(home)
-        finmint_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        finmint_dir.chmod(0o700)
-        config = dict(DEFAULT_CONFIG)
-
-    if "copilot" not in config:
-        config["copilot"] = {}
-    config["copilot"]["token"] = token
-
-    config_file.write_text(yaml.dump(config, default_flow_style=False))
-    config_file.chmod(0o600)
-    return config_file
+    finmint_dir = _finmint_dir(home)
+    finmint_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    finmint_dir.chmod(0o700)
+    token_file = _token_path(home)
+    token_file.write_text(token + "\n")
+    token_file.chmod(0o600)
+    return token_file
 
 
-def get_token(config: dict) -> str:
-    """Read the Copilot Money JWT from config.
-    Raises RuntimeError if the token is not set or empty.
+def get_token(home: Path | None = None) -> str:
+    """Read the Copilot Money JWT from ~/.finmint/token.
+    Strips 'Bearer ' prefix and whitespace.
+    Raises RuntimeError if the file is missing or empty.
     """
-    token = config.get("copilot", {}).get("token", "")
-    if not token or not token.strip():
+    token_file = _token_path(home)
+    if not token_file.exists():
         raise RuntimeError(
-            "Copilot Money token is not set.\n"
-            "Run 'finmint token' to paste your JWT from the Copilot Money web app."
+            "Copilot Money token file not found.\n"
+            "Run 'finmint token' to create ~/.finmint/token, then paste your JWT there."
+        )
+    token = token_file.read_text().strip()
+    if token.startswith("Bearer "):
+        token = token[7:]
+    if not token:
+        raise RuntimeError(
+            "Copilot Money token file is empty.\n"
+            "Paste your JWT into ~/.finmint/token and run 'finmint token' to validate."
         )
     return token

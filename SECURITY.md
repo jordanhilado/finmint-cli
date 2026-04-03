@@ -1,5 +1,15 @@
 # Security Policy
 
+## Overview
+
+All credentials are stored locally on your machine. Finmint never transmits your data to any server other than the Copilot Money API and the Anthropic API.
+
+- **Copilot Money JWT** is stored in `~/.finmint/token` with `0600` permissions (owner-read-only)
+- **Claude API key** is read from an environment variable (`ANTHROPIC_API_KEY` by default) -- never stored on disk
+- **Transaction data** is stored in a local SQLite database at `~/.finmint/finmint.db`
+- **No data leaves your machine** except API calls to Copilot Money (read and write-back) and Anthropic (categorization)
+- **Data sent to Anthropic** includes merchant names, amounts, and dates for categorization -- no account numbers, tokens, or other PII
+
 ## Supported Versions
 
 | Version | Supported |
@@ -35,7 +45,7 @@ Finmint handles two types of credentials:
 If you discover a security vulnerability in Finmint, please report it responsibly:
 
 1. **Do not open a public issue.**
-2. Use [GitHub's private security advisory feature](https://github.com/jordanhilado/finmint/security/advisories/new) to report the vulnerability, or email the maintainer at jordanalihilado@gmail.com.
+2. Use [GitHub's private security advisory feature](https://github.com/jordanhilado/finmint-cli/security/advisories/new) to report the vulnerability, or email the maintainer at jordanalihilado@gmail.com.
 3. Include a description of the vulnerability, steps to reproduce, and potential impact.
 
 We will acknowledge receipt within 48 hours and aim to release a fix promptly.

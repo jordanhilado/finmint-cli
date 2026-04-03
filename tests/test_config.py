@@ -86,7 +86,7 @@ class TestValidateConfig:
 
     def test_raw_api_key_warns(self):
         config = {
-            "claude": {"api_key_env": "sk-ant-api03-secret"},
+            "claude": {"api_key_env": "sk-ant-FAKE-KEY-FOR-TEST"},
         }
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")

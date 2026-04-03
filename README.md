@@ -2,7 +2,7 @@
 
 Unofficial CLI-based wrapper for [Copilot Money](https://copilot.money) - auto-categorize with AI, review interactively, and visualize spending.
 
-> **Disclaimer:** This project is **not affiliated with, endorsed by, or associated with Copilot Money (Copilot IQ, Inc.)** in any way. It uses a reverse-engineered, unofficial API that may break at any time. **This tool is not financial advice.** Use at your own risk. See [Legal](#legal) for full details.
+> **Disclaimer:** This project is **not affiliated with, endorsed by, or associated with Copilot Money (Copilot IQ, Inc.)** in any way. It uses a reverse-engineered, unofficial API that may break at any time. **This tool is not financial advice.** Use at your own risk. See [LEGAL.md](LEGAL.md) for full details.
 
 ## Features
 
@@ -15,6 +15,32 @@ Unofficial CLI-based wrapper for [Copilot Money](https://copilot.money) - auto-c
 - Pie charts (monthly) and bar charts (yearly) for spending visualization
 - AI-generated narrative summaries of your spending patterns
 - Manage labels, accounts, and merchant rules from the terminal
+
+## Screenshots
+
+### Review TUI
+
+Review, categorize, and annotate transactions in an interactive table. Sort by any column, bulk-select, and write changes back to Copilot Money. Press `t` to toggle to a one-by-one view for focused review.
+
+![Review TUI](docs/screenshots/review-tui.svg)
+
+### Labels Manager
+
+Create, rename, recolor, and delete category labels.
+
+![Labels TUI](docs/screenshots/labels-tui.svg)
+
+### Accounts
+
+View all connected bank accounts and their sync status.
+
+![Accounts TUI](docs/screenshots/accounts-tui.svg)
+
+### Rules Manager
+
+Manage merchant-to-category rules that auto-categorize future transactions.
+
+![Rules TUI](docs/screenshots/rules-tui.svg)
 
 ## Install
 
